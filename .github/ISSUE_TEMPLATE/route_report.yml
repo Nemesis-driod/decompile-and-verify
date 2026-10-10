@@ -1,0 +1,36 @@
+name: Route report
+description: Tell us whether a documented route worked for you (good and bad results both help)
+labels: [route-report]
+body:
+  - type: dropdown
+    id: route
+    attributes:
+      label: Route
+      options: [Native ELF, Native PE, Mach-O, .NET, Java, Android, Python, Electron, WebAssembly, Unity, Retro ROM, Other]
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Tool and version
+      description: For example "jadx 1.5.6" or "pycdc b428976".
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+    validations:
+      required: true
+  - type: dropdown
+    id: outcome
+    attributes:
+      label: Outcome
+      options: [Worked as documented, Worked with changes, Did not work]
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: What you changed, what broke, what the documentation should say instead. Do not attach binaries you do not have the right to share.

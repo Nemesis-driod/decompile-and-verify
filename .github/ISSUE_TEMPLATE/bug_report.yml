@@ -1,0 +1,35 @@
+name: Bug report
+description: A script failed, printed a wrong verdict, or an instruction misled the agent
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get? Paste the RESULT: line the script printed.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or prompt
+      description: The exact command you ran, or the prompt you gave your agent.
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options: [Linux, macOS, Windows, WSL]
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Python, Ghidra, JDK, and which agent (and model) you used.
+  - type: dropdown
+    id: target
+    attributes:
+      label: Target type
+      options: [Native ELF, Native PE, Mach-O, .NET, Java or Android, Python, Electron, WebAssembly, Unity, Retro ROM, Other]

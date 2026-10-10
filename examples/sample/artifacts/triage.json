@@ -1,0 +1,33 @@
+{
+  "file": "sample_stripped",
+  "sha256": "eb38a07fd19396c0e7442a694b5bcae659f8662db4c79e06fd9365d551c9182c",
+  "size_bytes": 14472,
+  "format": "ELF",
+  "bits": 64,
+  "arch": "x86-64",
+  "stripped": true,
+  "has_debug_info": false,
+  "go_binary": false,
+  "kind": "native",
+  "runtime_hints": [
+    "GCC"
+  ],
+  "compiler_banner": "GCC: (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "protection_hints": [],
+  "entropy_overall": 1.55,
+  "high_entropy_block_ratio": 0.0,
+  "route": "native -> python3 scripts/ghidra_export.py <file> <outdir>   (references/routes.md: Native)",
+  "findings": {
+    "urls": [
+      "https://licensing.example-corp.test/v2/activate"
+    ],
+    "ips": [],
+    "build_paths": [],
+    "secret_like": [
+      {
+        "type": "credential-assignment",
+        "redacted": "api_ke...(33 chars)"
+      }
+    ]
+  }
+}

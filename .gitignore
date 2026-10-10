@@ -1,0 +1,13 @@
+work/
+__pycache__/
+*.pyc
+evals/results/
+examples/sample/sample_stripped
+examples/sample/sample_unstripped
+examples/sample/rewrite
+examples/sample/inputs/
+examples/python-bundle/dist/
+examples/python-bundle/build/
+examples/python-bundle/*.spec
+examples/python-bundle/*_extracted/
+examples/python-bundle/demo_pycdc*.py

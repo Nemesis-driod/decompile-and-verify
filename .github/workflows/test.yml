@@ -1,0 +1,31 @@
+name: test
+on: [push, pull_request]
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: sudo apt-get update && sudo apt-get install -y gcc binutils
+      - run: python -m unittest discover -s tests -v
+      - name: validate skills against the Agent Skills spec
+        run: |
+          pip install "git+https://github.com/agentskills/agentskills.git#subdirectory=skills-ref"
+          for d in skills/*/; do skills-ref validate "$d"; done
+  portable:
+    # Runs the platform-independent tests (the ones that build ELF binaries skip themselves).
+    # Informational: a failure here does not fail the main check.
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v

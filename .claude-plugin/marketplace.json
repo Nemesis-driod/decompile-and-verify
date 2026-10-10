@@ -1,0 +1,17 @@
+{
+  "$schema": "https://code.claude.com/schemas/marketplace.json",
+  "name": "decompile-and-verify",
+  "description": "Agent skills that decompile compiled software and prove the result, and measure how recoverable a build is.",
+  "owner": {
+    "name": "Nemesis-driod",
+    "url": "https://github.com/Nemesis-driod"
+  },
+  "plugins": [
+    {
+      "name": "decompile-and-verify",
+      "source": "./",
+      "description": "Decompile compiled software with an AI agent and prove every recovered function against the original, plus an assessment skill that measures how recoverable a build is.",
+      "version": "0.3.0"
+    }
+  ]
+}

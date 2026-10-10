@@ -1,0 +1,5 @@
+address,name,status,oracle,attempts,seconds,notes
+0x101250,FUN_00101250,equivalent-tested,differential (whole program; 40 inputs),1,,FNV-1a over 16 bytes (constants 0x811c9dc5 and 0x1000193); masked to 31 bits
+0x101280,FUN_00101280,equivalent-tested,differential (whole program; 40 inputs),1,,licence check: length 16 and checksum % 97 == 42
+0x1010a0,FUN_001010a0,equivalent-tested,differential (whole program; 40 inputs),1,,main: prints the activation endpoint and an api_key config string
+0x1012b0,FUN_001012b0,equivalent-tested,differential (whole program; 40 inputs),1,,returns a compiler-folded constant (90.0)

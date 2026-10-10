@@ -1,0 +1,26 @@
+{
+  "file": "sample_stripped",
+  "components": {
+    "S": 0.0,
+    "L": 1.0,
+    "X": 0.8,
+    "R": 1.0
+  },
+  "notes": {
+    "S": "0 of 5 functions carry names",
+    "L": "24/24 decompile cleanly, 0.0 gotos per 100 lines",
+    "X": "1 secret-like, 1 URLs, 0 IPs, 0 build paths",
+    "R": "4 of 4 attempted functions recovered in 4 attempts"
+  },
+  "ri": 76.0,
+  "band": "HIGH",
+  "surface_inconclusive": false,
+  "recovery": {
+    "attempted": 4,
+    "recovered": 4,
+    "attempts_total": 4,
+    "attempts_per_recovered": 1.0,
+    "seconds_total": null,
+    "unverified": 0
+  }
+}

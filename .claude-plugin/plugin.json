@@ -1,0 +1,20 @@
+{
+  "name": "decompile-and-verify",
+  "version": "0.3.0",
+  "description": "Decompile compiled software with an AI agent and prove every recovered function against the original, plus an assessment skill that measures how recoverable a build is.",
+  "author": {
+    "name": "Nemesis-driod",
+    "url": "https://github.com/Nemesis-driod"
+  },
+  "homepage": "https://github.com/Nemesis-driod/decompile-and-verify",
+  "repository": "https://github.com/Nemesis-driod/decompile-and-verify",
+  "license": "MIT",
+  "keywords": [
+    "decompilation",
+    "reverse-engineering",
+    "ghidra",
+    "binary-analysis",
+    "software-protection",
+    "agent-skills"
+  ]
+}
