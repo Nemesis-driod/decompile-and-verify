@@ -4,7 +4,7 @@
 
 A decompiler's output is a hypothesis. These skills make your agent test every recovered function against the original, with scripts that print a verdict instead of an opinion. A second skill measures how recoverable a build is for an AI agent, and what it cost the agent to recover it.
 
-> **Status: v0.2.** The native route is tested end to end (Ghidra 12.1.4, x86-64 ELF, 20 unit tests, validated with the official `skills-ref` checker). The .NET, Java/Android, Python, Unity, WebAssembly and retro-ROM routes use standard tool invocations that this repo's tests do not exercise yet.
+> **Status: v0.3.** The native route is tested end to end (Ghidra 12.1.4, x86-64 ELF, 20 unit tests, validated with the official `skills-ref` checker). The .NET, Java/Android, Python, Unity, WebAssembly and retro-ROM routes use standard tool invocations that this repo's tests do not exercise yet.
 
 ## What it looks like
 
