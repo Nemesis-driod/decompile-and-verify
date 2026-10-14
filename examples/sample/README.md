@@ -37,4 +37,15 @@ python3 make_inputs.py inputs                               # boundary lengths, 
 python3 $S/verify_run.py --original ./sample_stripped --rewrite ./rewrite --inputs inputs --mode arg-text
 ```
 
+### Check one function against the original machine code
+
+`candidate_checksum.c` is the checksum function as recovered. `verify_emulated.py` runs the original function (at Ghidra address 0x101250 in the stripped build) under emulation and compares:
+
+```bash
+pip install unicorn
+gcc -O2 -shared -fPIC -o cand_checksum.so candidate_checksum.c
+python3 $S/verify_emulated.py --binary sample_stripped --address 0x101250 --image-base 0x100000 \
+  --args ptr --ret u32 --candidate-lib cand_checksum.so --symbol fnv1a_16
+```
+
 Function addresses and counts depend on your compiler version; `artifacts/ledger.csv` holds the author's addresses.

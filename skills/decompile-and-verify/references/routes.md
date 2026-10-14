@@ -3,6 +3,7 @@
 ## Contents
 - Status of each route
 - Picking the route
+- Analysis providers (optional)
 - Native
 - .NET
 - Java and Android
@@ -38,6 +39,10 @@ Run `python3 scripts/triage.py <file>`; its `route:` line names the section belo
 
 Managed code (.NET, Java, Android) usually decompiles to near-source because names and types survive compilation. Native code loses them, so expect more inference and more verification work.
 
+## Analysis providers (optional)
+
+Ghidra MCP servers and REA (`npx rea-agents setup`, MIT) give an agent live, structured access to Hopper, Ghidra or IDA, and REA keeps an evidence record for each finding and has its own `verify_reconstruction` tool for declared claims. Not run here. Use them for exploration if you like. Keep this skill's scripts for the checks, because the verdict a script prints is what the ledger and the report record. Do not run two skills with overlapping instructions at once: pick one workflow for the task and say which.
+
 ## Native
 
 - Batch export: `python3 scripts/ghidra_export.py <bin> work/export` (Windows: `python`). Needs Ghidra and a JDK 21+ with `javac`; set `GHIDRA_HOME` to the folder that contains `support/analyzeHeadless`. A 14 KB ELF took about 40 seconds and a 296-function Win32 program about 47 on one CPU. Use `--max N` or `--no-decompile` to scope big files.
@@ -45,7 +50,7 @@ Managed code (.NET, Java, Android) usually decompiles to near-source because nam
 - Interactive work: a Ghidra MCP server lets the agent rename, retype and follow cross references live (GhidraMCP, pyghidra-mcp, ReVa; IDA has ida-pro-mcp and an official MCP). Not run here. Bind any MCP or debugger server to 127.0.0.1, since some default to 0.0.0.0. Keep using the batch export for ranking.
 - rizin: `rizin -e scr.color=0 -qc 'aaa; afl' file` lists functions and `rizin -e scr.color=0 -qc 'aaa; pdf @ main' file` disassembles one. Without `-e scr.color=0` it prints ANSI colour codes even when piped. It named `main` correctly in a stripped build. Not in the Ubuntu 24.04 archive; the static release from GitHub works.
 - `objdump -d -M intel --no-show-raw-insn file` disassembles everything.
-- Function-level testing: `ctypes` and `dlopen` cannot load a position-independent executable ("cannot dynamically load position-independent executable"). Use a shared library, a whole-program test, or emulation.
+- Function-level testing: `ctypes` and `dlopen` cannot load a position-independent executable ("cannot dynamically load position-independent executable"). Use `scripts/verify_emulated.py` (see `references/verification.md`), a shared library, or a whole-program test.
 - Strings first, then cross references, then the function. Rename what you understand; renames accumulate into a readable program.
 - Confirm dynamic claims before building on them. Agents can confidently misidentify things.
 - Go: GoReSym recovers names from `.gopclntab`, even when stripped. Rust: `rustfilt` demangles. Unreal Engine: dump the reflection data first (UE4SS or Dumper-7 style tools). None of these were run here.

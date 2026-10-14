@@ -11,7 +11,7 @@
       "name": "decompile-and-verify",
       "source": "./",
       "description": "Decompile compiled software with an AI agent and prove every recovered function against the original, plus an assessment skill that measures how recoverable a build is.",
-      "version": "0.3.0"
+      "version": "0.4.0"
     }
   ]
 }

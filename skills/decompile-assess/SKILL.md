@@ -6,7 +6,7 @@ compatibility: Builds on the decompile-and-verify skill installed alongside it. 
 metadata:
   author: Nemesis-driod
   homepage: https://github.com/Nemesis-driod/decompile-and-verify
-  version: "0.3.0"
+  version: "0.4.0"
 ---
 
 # Decompile assessment

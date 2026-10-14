@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -19,6 +20,7 @@ SAMPLE = ROOT / "examples" / "sample" / "artifacts"
 HAVE_GCC = bool(shutil.which("gcc") and shutil.which("objdump"))
 IS_LINUX = sys.platform.startswith("linux")      # the tests that build binaries assume ELF and GNU tools
 IS_POSIX = os.name != "nt"
+HAVE_UNICORN = importlib.util.find_spec("unicorn") is not None
 SUM_TO = "int sum_to(int n){int s=0;for(int i=1;i<=n;i++)s+=i;return s;}\n"
 # Built at runtime so no key-shaped literal is ever committed (secret scanners would flag it).
 FAKE_AWS_KEY = "AKIA" + "Q" * 16
@@ -358,6 +360,191 @@ class RenderReportTests(TempDirCase):
     def test_missing_inputs_are_a_clear_error(self):
         r = py(ASSESS / "render_report.py", "--triage", self.tmp / "nope.json", "--exposure", self.tmp / "nope2.json")
         self.assertIn("RESULT: REPORT_ERROR", r.stdout)
+        self.assertEqual(r.returncode, 2)
+
+
+def make_pe(code, bits):
+    """Build a minimal PE (one .text section) so the emulator's PE loader can be tested on any platform."""
+    dos = bytearray(64)
+    dos[0:2] = b"MZ"
+    struct.pack_into("<I", dos, 0x3C, 64)
+    opt_size = 224 if bits == 32 else 240
+    coff = struct.pack("<HHIIIHH", 0x14C if bits == 32 else 0x8664, 1, 0, 0, 0, opt_size, 0x0102)
+    base = 0x400000 if bits == 32 else 0x140000000
+    opt = bytearray(opt_size)
+    struct.pack_into("<H", opt, 0, 0x10B if bits == 32 else 0x20B)
+    if bits == 32:
+        struct.pack_into("<I", opt, 28, base)
+    else:
+        struct.pack_into("<Q", opt, 24, base)
+    struct.pack_into("<I", opt, 32, 0x1000)
+    struct.pack_into("<I", opt, 36, 0x200)
+    struct.pack_into("<I", opt, 56, 0x2000)
+    struct.pack_into("<I", opt, 60, 0x200)
+    sec = bytearray(40)
+    sec[0:5] = b".text"
+    struct.pack_into("<IIII", sec, 8, len(code), 0x1000, 0x200, 0x200)
+    head = (bytes(dos) + b"PE\0\0" + coff + bytes(opt) + bytes(sec)).ljust(0x200, b"\0")
+    return head + code.ljust(0x200, b"\0")
+
+
+@unittest.skipUnless(HAVE_UNICORN, "needs: pip install unicorn")
+class VerifyEmulatedPortableTests(TempDirCase):
+    def run_oracle(self, binary, *extra):
+        return py(SCRIPTS / "verify_emulated.py", "--binary", binary, *extra)
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "add32.exe").write_bytes(make_pe(bytes.fromhex("8B442404" "03442408" "C3"), 32))   # cdecl: a + b
+        (self.tmp / "add64.exe").write_bytes(make_pe(bytes.fromhex("8D0411" "C3"), 64))                # win64: lea eax,[rcx+rdx]
+        (self.tmp / "fast32.exe").write_bytes(make_pe(bytes.fromhex("8D0411" "C3"), 32))               # fastcall: lea eax,[ecx+edx]
+        (self.tmp / "cand.py").write_text("def add(a, b):\n    return a + b\n\ndef wrong(a, b):\n    return a - b\n")
+
+    def test_pe32_cdecl_with_va_and_rva_addresses(self):
+        for address in ("0x401000", "0x1000"):
+            r = self.run_oracle(self.tmp / "add32.exe", "--address", address, "--args", "i32,i32", "--ret", "i32",
+                                "--candidate-py", f"{self.tmp / 'cand.py'}:add")
+            self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout)
+            self.assertEqual(r.returncode, 0)
+
+    def test_pe64_win64_convention(self):
+        r = self.run_oracle(self.tmp / "add64.exe", "--address", "0x140001000", "--args", "i32,i32", "--ret", "i32",
+                            "--candidate-py", f"{self.tmp / 'cand.py'}:add")
+        self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout)
+
+    def test_fastcall_convention(self):
+        r = self.run_oracle(self.tmp / "fast32.exe", "--address", "0x401000", "--abi", "fastcall", "--args", "i32,i32", "--ret", "i32",
+                            "--candidate-py", f"{self.tmp / 'cand.py'}:add")
+        self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout)
+
+    def test_a_wrong_candidate_is_caught(self):
+        r = self.run_oracle(self.tmp / "add32.exe", "--address", "0x401000", "--args", "i32,i32", "--ret", "i32",
+                            "--candidate-py", f"{self.tmp / 'cand.py'}:wrong")
+        self.assertIn("RESULT: DIFFERS", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_cases_file_is_used(self):
+        (self.tmp / "cases.jsonl").write_text("[2147483647, 1]\n[-2147483648, -1]\n")
+        r = self.run_oracle(self.tmp / "add32.exe", "--address", "0x401000", "--args", "i32,i32", "--ret", "i32", "--no-boundary",
+                            "--random", "0", "--cases", self.tmp / "cases.jsonl", "--candidate-py", f"{self.tmp / 'cand.py'}:add")
+        self.assertIn("RESULT: EQUIVALENT_ON 2 cases", r.stdout, r.stdout)
+        self.assertIn("WARNING: only 2 cases", r.stdout)
+
+    def test_setup_errors_exit_2(self):
+        r = self.run_oracle(self.tmp / "add32.exe", "--address", "0x9999999", "--args", "i32", "--ret", "i32",
+                            "--candidate-py", f"{self.tmp / 'cand.py'}:add")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+        self.assertEqual(r.returncode, 2)
+        r = self.run_oracle(self.tmp / "add32.exe", "--address", "0x401000", "--args", "i32", "--ret", "i32")
+        self.assertIn("Give a candidate", r.stdout)
+
+    def test_missing_unicorn_has_an_install_hint(self):
+        code = ("import sys, runpy; sys.modules['unicorn'] = None; "
+                f"sys.argv = ['v', '--binary', {str(self.tmp / 'add32.exe')!r}, '--address', '0x401000', '--args', 'i32,i32', '--candidate-py', {str(self.tmp / 'cand.py') + ':add'!r}]; "
+                f"runpy.run_path({str(SCRIPTS / 'verify_emulated.py')!r}, run_name='__main__')")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertIn("pip install unicorn", r.stdout)
+        self.assertEqual(r.returncode, 2)
+
+
+@unittest.skipUnless(HAVE_UNICORN and HAVE_GCC and IS_LINUX and shutil.which("strip") and shutil.which("nm"), "needs unicorn, gcc, strip and nm on Linux")
+class VerifyEmulatedElfTests(TempDirCase):
+    SOURCE = """
+#include <stdio.h>
+__attribute__((noinline)) unsigned int fnv16(const unsigned char *p){ unsigned int h=2166136261u; for(int i=0;i<16;i++){h^=p[i];h*=16777619u;} return h&0x7fffffff; }
+__attribute__((noinline)) void fill(unsigned char *p){ for(int i=0;i<16;i++) p[i]=(unsigned char)(i*3+1); }
+__attribute__((noinline)) double scale(double x, int n){ return x*n + 0.5; }
+__attribute__((noinline)) int calls_puts(int x){ puts("hi"); return x + 1; }
+int main(int c,char**v){ unsigned char b[16]={0}; b[0]=(unsigned char)c; printf("%u %f %d\\n", fnv16(b), scale(c*1.5,c), calls_puts(c)); fill(b); return b[1]; }
+"""
+    CANDIDATE = """
+unsigned int fnv16(const unsigned char *p){ unsigned int h=2166136261u; for(int i=0;i<16;i++){h^=p[i];h*=16777619u;} return h&0x7fffffff; }
+void fill(unsigned char *p){ for(int i=0;i<16;i++) p[i]=(unsigned char)(i*3+1); }
+double scale(double x, int n){ return x*n + 0.5; }
+int calls_puts(int x){ return x + 1; }
+"""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "t.c").write_text(self.SOURCE)
+        subprocess.run(["gcc", "-O2", "-fno-ipa-cp", "-fno-ipa-sra", "-fno-stack-protector", "-o", str(self.tmp / "t"), str(self.tmp / "t.c")], check=True)
+        nm = subprocess.run(["nm", str(self.tmp / "t")], capture_output=True, text=True).stdout
+        self.addr = {parts[2]: "0x" + parts[0] for parts in (line.split() for line in nm.splitlines()) if len(parts) == 3 and parts[1] in "tT"}
+        subprocess.run(["strip", str(self.tmp / "t")], check=True)             # the oracle must work on a stripped binary
+        for name, text in (("good", self.CANDIDATE), ("bad", self.CANDIDATE.replace("16777619u", "16777620u"))):
+            (self.tmp / f"{name}.c").write_text(text)
+            subprocess.run(["gcc", "-O2", "-shared", "-fPIC", "-o", str(self.tmp / f"{name}.so"), str(self.tmp / f"{name}.c")], check=True)
+
+    def oracle(self, func, args, ret, lib="good"):
+        return py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / "t", "--address", self.addr[func], "--args", args, "--ret", ret,
+                  "--candidate-lib", self.tmp / f"{lib}.so", "--symbol", func)
+
+    def test_pointer_in_integer_return(self):
+        self.assertIn("RESULT: EQUIVALENT_ON", self.oracle("fnv16", "ptr", "u32").stdout)
+
+    def test_pointer_out_buffer_is_compared(self):
+        self.assertIn("RESULT: EQUIVALENT_ON", self.oracle("fill", "ptr", "void").stdout)
+
+    def test_double_arguments_and_return(self):
+        self.assertIn("RESULT: EQUIVALENT_ON", self.oracle("scale", "f64,i32", "f64").stdout)
+
+    def test_sabotaged_candidate_is_caught_on_the_stripped_binary(self):
+        r = self.oracle("fnv16", "ptr", "u32", lib="bad")
+        self.assertIn("RESULT: DIFFERS", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_call_into_libc_is_a_clear_emulation_error(self):
+        r = self.oracle("calls_puts", "i32", "i32")
+        self.assertIn("RESULT: EMULATION_ERROR", r.stdout)
+        self.assertIn("calls an import or a library function", r.stdout)
+        self.assertEqual(r.returncode, 2)
+
+
+class VerifyTraceTests(TempDirCase):
+    def write(self, name, rows):
+        path = self.tmp / name
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return path
+
+    def trace(self, drift=0.0, late_from=None):
+        return [{"t": t, "x": float(t) + (drift if t >= 3 else 0.0), "hp": 100 - t // 7} for t in range(40)]
+
+    def compare(self, a, b, *extra):
+        return py(SCRIPTS / "verify_trace.py", "--original", self.write("a.jsonl", a), "--rewrite", self.write("b.jsonl", b), *extra)
+
+    def test_identical_traces_match(self):
+        r = self.compare(self.trace(), self.trace())
+        self.assertIn("RESULT: TRACE_MATCH 40 ticks", r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+    def test_first_divergence_is_reported_with_its_tick(self):
+        r = self.compare(self.trace(), self.trace(drift=0.5))
+        self.assertIn("RESULT: TRACE_DIVERGES at tick 3", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_tolerance_accepts_float32_sized_drift(self):
+        self.assertIn("TRACE_DIVERGES", self.compare(self.trace(), self.trace(drift=2e-5)).stdout)
+        self.assertIn("RESULT: TRACE_MATCH", self.compare(self.trace(), self.trace(drift=2e-5), "--tolerance", "1e-4").stdout)
+
+    def test_per_key_tolerance_and_ignore(self):
+        a, b = self.trace(), self.trace()
+        b[5]["hp"] += 1
+        self.assertIn("TRACE_DIVERGES", self.compare(a, b).stdout)
+        self.assertIn("TRACE_MATCH", self.compare(a, b, "--ignore", "hp").stdout)
+        self.assertIn("TRACE_MATCH", self.compare(a, b, "--key-tolerance", "hp=1").stdout)
+
+    def test_dropped_tick_is_a_misalignment_not_a_value_difference(self):
+        b = self.trace()
+        del b[10]
+        r = self.compare(self.trace(), b)
+        self.assertIn("RESULT: TRACE_MISALIGNED at line 11", r.stdout)
+
+    def test_different_lengths_are_reported(self):
+        self.assertIn("different lengths", self.compare(self.trace(), self.trace() + [{"t": 40, "x": 40.0, "hp": 94}]).stdout)
+
+    def test_missing_file_is_a_setup_error(self):
+        r = py(SCRIPTS / "verify_trace.py", "--original", self.tmp / "no.jsonl", "--rewrite", self.tmp / "no2.jsonl")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
         self.assertEqual(r.returncode, 2)
 
 
