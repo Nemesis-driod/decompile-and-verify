@@ -14,6 +14,7 @@ import difflib
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import signal
 import sys
@@ -77,24 +78,31 @@ def main():
             fail(f"RESULT: BUILD_FAILED\nfile not found: {path}")
 
     cand_obj = args.candidate_obj
+    workdir = None
     if args.candidate:
-        src = open(args.candidate, encoding="utf-8", errors="replace").read()
+        with open(args.candidate, encoding="utf-8", errors="replace") as f:
+            src = f.read()
         if ASM_RE.search(src):
             print("RESULT: REJECTED")
             print("The candidate contains inline assembly or raw data directives. Embedding the target's instructions")
             print("is not a decompilation and would satisfy this check trivially. Rewrite it in plain C.")
             sys.exit(2)
-        tmp = tempfile.mkdtemp(prefix="verify-match-")
-        cand_obj = os.path.join(tmp, "candidate.o")
+        workdir = tempfile.mkdtemp(prefix="verify-match-")
+        cand_obj = os.path.join(workdir, "candidate.o")
         p = subprocess.run(split_command(args.cc) + [args.candidate, "-o", cand_obj], capture_output=True, text=True)
         if p.returncode != 0:
+            shutil.rmtree(workdir, ignore_errors=True)
             print("RESULT: BUILD_FAILED")
             print("The candidate does not compile. Treat this as a failed attempt. First errors:")
             print("\n".join(p.stderr.strip().splitlines()[:15]))
             sys.exit(2)
 
-    target = disassemble(args.target, args.objdump, args.func)
-    cand = disassemble(cand_obj, args.objdump, args.func)
+    try:
+        target = disassemble(args.target, args.objdump, args.func)
+        cand = disassemble(cand_obj, args.objdump, args.func)
+    finally:
+        if workdir:
+            shutil.rmtree(workdir, ignore_errors=True)       # gone before anything is printed, so a closed pipe cannot leak it
     if not target:
         fail("RESULT: BUILD_FAILED\nNo instructions found in the target. Check --func spelling (symbol names must match).")
 

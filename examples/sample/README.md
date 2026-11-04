@@ -48,4 +48,15 @@ python3 $S/verify_emulated.py --binary sample_stripped --address 0x101250 --imag
   --args ptr --ret u32 --candidate-lib cand_checksum.so --symbol fnv1a_16
 ```
 
+### Check that the evidence is still current
+
+Each row of `artifacts/ledger.csv` is bound by sha256 to the build, the candidate and the inputs it was verified with. After `python3 make_inputs.py inputs` (the inputs are deterministic):
+
+```bash
+python3 $S/ledger.py check artifacts/ledger.csv --build sample_stripped
+# RESULT: LEDGER_CURRENT 4 rows (pinned to the given build)
+```
+
+If your compiler produces a different binary, `check` reports `BUILD_MISMATCH`, which is the point: results proven for one build do not carry over to another.
+
 Function addresses and counts depend on your compiler version; `artifacts/ledger.csv` holds the author's addresses.

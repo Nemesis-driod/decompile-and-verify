@@ -1,5 +1,7 @@
 """Tests for the decompile-and-verify scripts. Run: python3 -m unittest discover -s tests -v"""
 import csv
+import glob
+import hashlib
 import importlib.util
 import json
 import os
@@ -548,6 +550,409 @@ class VerifyTraceTests(TempDirCase):
         self.assertEqual(r.returncode, 2)
 
 
+def command_for(script_path):
+    """A command string for verify_run.py that runs a Python script, quoted for any platform."""
+    return f'"{sys.executable}" "{script_path}"'
+
+
+class VerifyRunSafetyTests(TempDirCase):
+    """Findings from the public review of verify_run.py: timeouts and vacuous results must not read as equivalence."""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "hang.py").write_text("import time\ntime.sleep(30)\n")
+        (self.tmp / "ok.py").write_text("print(1)\n")
+        (self.tmp / "die.py").write_text("import sys\nsys.exit(3)\n")
+        self.inputs = self.tmp / "in"
+        self.inputs.mkdir()
+        (self.inputs / "a.txt").write_text("1\n")
+
+    def verdict(self, original, rewrite, *extra):
+        return py(SCRIPTS / "verify_run.py", "--original", command_for(self.tmp / original), "--rewrite", command_for(self.tmp / rewrite),
+                  "--inputs", self.inputs, "--min-inputs", "1", *extra)
+
+    def test_two_timeouts_are_inconclusive_not_equivalent(self):
+        r = self.verdict("hang.py", "hang.py", "--timeout", "1")
+        self.assertIn("RESULT: INCONCLUSIVE", r.stdout)
+        self.assertNotIn("EQUIVALENT_ON", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_timeout_on_one_side_only_is_a_difference(self):
+        r = self.verdict("ok.py", "hang.py", "--timeout", "1")
+        self.assertIn("RESULT: DIFFERS on 1 of 1 inputs", r.stdout)
+        self.assertIn("rewrite=timeout", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_identical_failures_on_every_input_are_flagged(self):
+        r = self.verdict("die.py", "die.py")
+        self.assertIn("WARNING: both programs exited with an error on every input", r.stdout)
+        strict = self.verdict("die.py", "die.py", "--strict")
+        self.assertIn("RESULT: INCONCLUSIVE", strict.stdout)
+        self.assertEqual(strict.returncode, 1)
+
+    def test_strict_turns_the_minimum_into_a_requirement(self):
+        loose = py(SCRIPTS / "verify_run.py", "--original", command_for(self.tmp / "ok.py"), "--rewrite", command_for(self.tmp / "ok.py"),
+                   "--inputs", self.inputs, "--min-inputs", "50")
+        self.assertEqual(loose.returncode, 0)
+        self.assertIn("WARNING: only 1 inputs", loose.stdout)
+        strict = py(SCRIPTS / "verify_run.py", "--original", command_for(self.tmp / "ok.py"), "--rewrite", command_for(self.tmp / "ok.py"),
+                    "--inputs", self.inputs, "--min-inputs", "50", "--strict")
+        self.assertIn("RESULT: TOO_FEW_INPUTS", strict.stdout)
+        self.assertEqual(strict.returncode, 1)
+
+    def test_nonsense_timeout_is_a_setup_error(self):
+        r = self.verdict("ok.py", "ok.py", "--timeout", "0")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+        self.assertEqual(r.returncode, 2)
+
+
+@unittest.skipUnless(HAVE_UNICORN, "needs: pip install unicorn")
+class VerifyEmulatedSafetyTests(TempDirCase):
+    """Findings from the public review of verify_emulated.py, plus the Windows path bug found by CI."""
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "add32.exe").write_bytes(make_pe(bytes.fromhex("8B442404" "03442408" "C3"), 32))
+        (self.tmp / "good.py").write_text("def add(a, b):\n    return a + b\n")
+        (self.tmp / "raises.py").write_text("def add(a, b):\n    return [][5]\n")
+        (self.tmp / "loops.py").write_text("def add(a, b):\n    while True:\n        pass\n")
+        (self.tmp / "dies.py").write_text("import os\n\ndef add(a, b):\n    os._exit(3)\n")
+        (self.tmp / "edge.py").write_text("def add(a, b):\n    if a == -2147483648 and b == 2147483647:\n        return 0\n    return a + b\n")
+
+    def oracle(self, candidate, *extra, binary="add32.exe", ret="i32", args="i32,i32"):
+        return py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / binary, "--address", "0x401000", "--args", args, "--ret", ret,
+                  "--candidate-py", f"{self.tmp / candidate}:add", "--random", "3", *extra)
+
+    def test_candidate_spec_splits_at_the_last_colon_so_windows_drive_letters_work(self):
+        module = load_module(SCRIPTS / "verify_emulated.py", "verify_emulated_spec")
+        self.assertEqual(module.split_candidate_spec(r"C:\Users\x\cand.py:add"), (r"C:\Users\x\cand.py", "add"))
+        self.assertEqual(module.split_candidate_spec("/tmp/a:b/cand.py:add"), ("/tmp/a:b/cand.py", "add"))
+        for bad in ("cand.py", r"C:\Users\x\cand.py", "cand.py:", "cand.py:not an identifier", "C:add"):
+            with self.assertRaises(ValueError, msg=bad):
+                module.split_candidate_spec(bad)
+
+    def test_a_path_with_a_colon_in_a_folder_name_works(self):
+        folder = self.tmp / "dir:with:colons"
+        folder.mkdir()
+        (folder / "cand.py").write_text("def add(a, b):\n    return a + b\n")
+        r = self.oracle("dir:with:colons/cand.py")
+        self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout)
+
+    def test_pointer_return_is_rejected_cleanly_not_with_a_traceback(self):
+        r = self.oracle("good.py", ret="ptr")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+        self.assertIn("pointer return cannot be compared", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_truncated_and_malformed_files_are_setup_errors(self):
+        (self.tmp / "t.elf").write_bytes(b"\x7fELF\x02\x01\x01\x00\x00\x00")
+        (self.tmp / "t.exe").write_bytes(b"MZ\x90\x00\x03\x00")
+        for name in ("t.elf", "t.exe"):
+            r = self.oracle("good.py", binary=name)
+            self.assertIn("RESULT: SETUP_ERROR", r.stdout, name)
+            self.assertIn("malformed or truncated", r.stdout, name)
+            self.assertNotIn("Traceback", r.stderr, name)
+            self.assertEqual(r.returncode, 2)
+
+    def test_a_tiny_file_declaring_a_gigantic_segment_cannot_exhaust_memory(self):
+        header = bytearray(64)
+        header[0:4] = b"\x7fELF"
+        header[4], header[5] = 2, 1
+        struct.pack_into("<H", header, 16, 2)
+        struct.pack_into("<H", header, 18, 0x3E)
+        struct.pack_into("<Q", header, 0x20, 64)
+        struct.pack_into("<HH", header, 0x36, 56, 1)
+        (self.tmp / "huge.elf").write_bytes(bytes(header) + struct.pack("<IIQQQQQQ", 1, 5, 0, 0x400000, 0, 0, 8 << 30, 0x1000))
+        r = py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / "huge.elf", "--address", "0x400000", "--args", "i32", "--ret", "i32",
+               "--candidate-py", f"{self.tmp / 'good.py'}:add", "--random", "1")
+        self.assertIn("RESULT:", r.stdout)                       # a verdict, not an out-of-memory kill
+        self.assertIn(r.returncode, (1, 2))
+
+    def test_a_python_candidate_that_raises_is_reported_as_a_difference(self):
+        r = self.oracle("raises.py")
+        self.assertIn("RESULT: DIFFERS", r.stdout)
+        self.assertIn("candidate raised IndexError", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_an_endless_loop_in_the_candidate_times_out_instead_of_hanging(self):
+        r = self.oracle("loops.py", "--candidate-timeout", "2")
+        self.assertIn("RESULT: CANDIDATE_TIMEOUT", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_candidate_process_that_dies_is_a_verdict_not_a_dead_verifier(self):
+        r = self.oracle("dies.py")
+        self.assertIn("RESULT: CANDIDATE_CRASH", r.stdout)
+        self.assertIn("exited with status 3", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_bugs_that_need_two_arguments_at_their_edges_are_found(self):
+        r = self.oracle("edge.py", "--random", "0")
+        self.assertIn("RESULT: DIFFERS", r.stdout, r.stdout)
+
+    def test_nonsense_numeric_options_are_rejected(self):
+        for flag, value in (("--float-tol", "-1"), ("--float-tol", "nan"), ("--candidate-timeout", "0")):
+            r = self.oracle("good.py", flag, value)
+            self.assertIn("RESULT: SETUP_ERROR", r.stdout, (flag, value))
+            self.assertEqual(r.returncode, 2)
+
+
+@unittest.skipUnless(HAVE_UNICORN and HAVE_GCC and IS_LINUX, "needs unicorn and gcc on Linux")
+class VerifyEmulatedNativeCandidateTests(TempDirCase):
+    def test_a_segfaulting_native_candidate_is_reported_and_does_not_kill_the_verifier(self):
+        (self.tmp / "c.c").write_text("unsigned int f(unsigned int a, unsigned int b){ return *(volatile unsigned int*)0; }\n")
+        subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(self.tmp / "c.so"), str(self.tmp / "c.c")], check=True)
+        (self.tmp / "o.exe").write_bytes(make_pe(bytes.fromhex("8B442404" "03442408" "C3"), 32))
+        r = py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / "o.exe", "--address", "0x401000", "--args", "u32,u32", "--ret", "u32",
+               "--candidate-lib", self.tmp / "c.so", "--symbol", "f", "--random", "2")
+        self.assertIn("RESULT: CANDIDATE_CRASH", r.stdout, r.stdout + r.stderr)
+        self.assertIn("SIGSEGV", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+
+class LedgerEvidenceTests(TempDirCase):
+    def add(self, *extra, name="f", address="0x10"):
+        return py(SCRIPTS / "ledger.py", "add", self.tmp / "l.csv", "--address", address, "--name", name, "--status", "equivalent-tested", *extra)
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "app").write_bytes(b"binary-A")
+        (self.tmp / "other").write_bytes(b"binary-B")
+        (self.tmp / "cand.c").write_text("int f(void){return 1;}\n")
+        (self.tmp / "inputs").mkdir()
+        (self.tmp / "inputs" / "a").write_text("1")
+
+    def pinned_row(self):
+        self.add("--build", self.tmp / "app", "--candidate", self.tmp / "cand.c", "--corpus", self.tmp / "inputs")
+
+    def check(self, *extra):
+        return py(SCRIPTS / "ledger.py", "check", self.tmp / "l.csv", "--root", "/", *extra)
+
+    def test_rows_record_the_hashes_of_their_evidence(self):
+        self.pinned_row()
+        with open(self.tmp / "l.csv", newline="", encoding="utf-8") as f:
+            row = list(csv.DictReader(f))[0]
+        self.assertEqual(len(row["build_sha256"]), 64)
+        self.assertEqual(len(row["candidate_sha256"]), 64)
+        self.assertEqual(len(row["corpus_sha256"]), 64)
+
+    def test_check_passes_when_nothing_changed(self):
+        self.pinned_row()
+        r = self.check("--build", self.tmp / "app")
+        self.assertIn("RESULT: LEDGER_CURRENT", r.stdout, r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+    def test_check_catches_a_candidate_edited_after_verification(self):
+        self.pinned_row()
+        (self.tmp / "cand.c").write_text("int f(void){return 2;}\n")
+        r = self.check("--build", self.tmp / "app")
+        self.assertIn("RESULT: LEDGER_STALE", r.stdout)
+        self.assertIn("STALE: candidate", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_check_catches_changed_or_missing_inputs(self):
+        self.pinned_row()
+        (self.tmp / "inputs" / "b").write_text("2")
+        self.assertIn("STALE: corpus", self.check("--build", self.tmp / "app").stdout)
+        for child in (self.tmp / "inputs").iterdir():
+            child.unlink()
+        (self.tmp / "inputs").rmdir()
+        self.assertIn("MISSING: corpus", self.check("--build", self.tmp / "app").stdout)
+
+    def test_check_catches_a_row_verified_against_a_different_build(self):
+        self.pinned_row()
+        r = self.check("--build", self.tmp / "other")
+        self.assertIn("BUILD_MISMATCH", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_unpinned_rows_are_called_out(self):
+        self.add()
+        r = self.check()
+        self.assertIn("UNPINNED", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_hand_edited_bad_value_is_a_clean_error_not_a_traceback(self):
+        self.add()
+        text = (self.tmp / "l.csv").read_text().replace(",equivalent-tested,,1,", ",equivalent-tested,,ten,")
+        (self.tmp / "l.csv").write_text(text)
+        r = py(SCRIPTS / "ledger.py", "summary", self.tmp / "l.csv")
+        self.assertIn("RESULT: LEDGER_ERROR", r.stdout)
+        self.assertIn("line 2: attempts 'ten' must be a whole number", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertEqual(r.returncode, 2)
+
+    def test_the_write_is_atomic_and_leaves_no_temporary_files(self):
+        self.pinned_row()
+        self.add(address="0x20", name="g")
+        self.assertEqual([p.name for p in self.tmp.iterdir() if p.name.startswith(".ledger-")], [])
+
+    def test_old_seven_column_ledgers_still_load(self):
+        (self.tmp / "l.csv").write_text("address,name,status,oracle,attempts,seconds,notes\n0x10,f,matched,m,2,,\n")
+        r = py(SCRIPTS / "ledger.py", "summary", self.tmp / "l.csv")
+        self.assertIn("RESULT: LEDGER_OK 1 functions", r.stdout)
+
+
+class BuildAwareConsumersTests(TempDirCase):
+    HEADER = "address,name,named,size_bytes,instructions,branches,calls,jumps,is_thunk,decompile_status,c_lines,gotos,autovars,c_file\n"
+    SHA_A, SHA_B = "a" * 64, "b" * 64
+
+    def write_inputs(self):
+        (self.tmp / "functions.csv").write_text(self.HEADER + '00100100,"FUN_00100100",false,30,10,1,0,0,false,ok,10,0,2,x.c\n'
+                                                '00100200,"FUN_00100200",false,30,12,1,0,0,false,ok,10,0,2,y.c\n')
+        (self.tmp / "summary.txt").write_text(f"program=app\nsha256={self.SHA_A}\nfunctions=2\n")
+        (self.tmp / "triage.json").write_text(json.dumps({"file": "app", "sha256": self.SHA_A, "kind": "native",
+                                                          "findings": {"secret_like": [], "urls": [], "ips": [], "build_paths": []}}))
+
+    def ledger(self, rows):
+        text = "address,name,status,oracle,attempts,seconds,notes,build_sha256\n" + "".join(rows)
+        (self.tmp / "ledger.csv").write_text(text)
+
+    def test_rank_ignores_rows_verified_against_another_build(self):
+        self.write_inputs()
+        self.ledger([f"0x100100,FUN_00100100,matched,m,1,,,{self.SHA_B}\n"])
+        r = py(SCRIPTS / "rank_functions.py", self.tmp / "functions.csv", "--ledger", self.tmp / "ledger.csv", "--out", self.tmp / "w.csv")
+        self.assertTrue(r.stdout.startswith("NEXT: 00100100"), r.stdout)          # not skipped: that row proves nothing here
+        self.assertIn("ignored 1 ledger row", r.stderr)
+
+    def test_rank_still_honours_rows_for_this_build(self):
+        self.write_inputs()
+        self.ledger([f"0x100100,FUN_00100100,matched,m,1,,,{self.SHA_A}\n"])
+        r = py(SCRIPTS / "rank_functions.py", self.tmp / "functions.csv", "--ledger", self.tmp / "ledger.csv", "--out", self.tmp / "w.csv")
+        self.assertTrue(r.stdout.startswith("NEXT: 00100200"), r.stdout)
+
+    def test_scorer_does_not_count_rows_from_another_build(self):
+        self.write_inputs()
+        self.ledger([f"0x100100,FUN_00100100,matched,m,1,,,{self.SHA_B}\n", f"0x100200,FUN_00100200,skipped,m,10,,,{self.SHA_A}\n"])
+        r = py(ASSESS / "score_exposure.py", "--functions", self.tmp / "functions.csv", "--triage", self.tmp / "triage.json",
+               "--ledger", self.tmp / "ledger.csv")
+        self.assertIn("0 of 1 attempted functions recovered", r.stdout, r.stdout)
+        self.assertIn("1 excluded (verified against a different build)", r.stdout)
+
+    def test_scorer_rejects_non_numeric_ledger_values_cleanly(self):
+        self.write_inputs()
+        self.ledger([f"0x100100,FUN_00100100,matched,m,ten,,,{self.SHA_A}\n"])
+        r = py(ASSESS / "score_exposure.py", "--functions", self.tmp / "functions.csv", "--triage", self.tmp / "triage.json",
+               "--ledger", self.tmp / "ledger.csv")
+        self.assertIn("is not a number", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_report_states_how_well_the_evidence_is_pinned(self):
+        out = self.tmp / "report.md"
+        exposure = self.tmp / "exposure.json"
+        py(ASSESS / "score_exposure.py", "--functions", SAMPLE / "functions.csv", "--triage", SAMPLE / "triage.json",
+           "--ledger", SAMPLE / "ledger.csv", "--json", exposure)
+        py(ASSESS / "render_report.py", "--triage", SAMPLE / "triage.json", "--exposure", exposure, "--ledger", SAMPLE / "ledger.csv", "--out", out)
+        text = out.read_text(encoding="utf-8")
+        self.assertIn("Evidence: 4 of 4 ledger rows are pinned to this build", text)
+        self.assertIn("build, candidate, corpus", text)
+
+
+class TriageRobustnessTests(TempDirCase):
+    def triage(self, name, data, *extra):
+        path = self.tmp / name
+        path.write_bytes(data)
+        r = py(SCRIPTS / "triage.py", path, "--json", self.tmp / "o.json", *extra)
+        return r, (json.loads((self.tmp / "o.json").read_text()) if (self.tmp / "o.json").exists() else None)
+
+    def test_truncated_headers_give_a_result_not_a_traceback(self):
+        for name, data in (("t.elf", b"\x7fELF\x02\x01\x01\x00\x00\x00"), ("t.exe", b"MZ\x90\x00\x03\x00"),
+                           ("t.zip", b"PK\x03\x04not-a-real-zip"), ("t.class", b"\xca\xfe\xba\xbe")):
+            r, result = self.triage(name, data)
+            self.assertEqual(r.returncode, 0, (name, r.stderr))
+            self.assertNotIn("Traceback", r.stderr, name)
+            self.assertEqual(result["kind"], "unknown", name) if name != "t.zip" else None
+
+    def test_a_malformed_header_is_stated_in_the_output(self):
+        r, result = self.triage("t.elf", b"\x7fELF\x02\x01\x01\x00\x00\x00")
+        self.assertIn("malformed or truncated", r.stdout)
+        self.assertTrue(result["malformed"])
+
+    def test_a_partial_scan_is_visible_and_the_limit_is_adjustable(self):
+        data = b"\0" * (2 << 20) + b"api_key=SUPERSECRETVALUE1234567890\n"
+        r, result = self.triage("big.bin", data, "--scan-mib", "1")
+        self.assertIn("only the first 1 MiB", r.stdout)
+        self.assertTrue(result["scan_truncated"])
+        self.assertEqual(result["findings"]["secret_like"], [])
+        r, result = self.triage("big.bin", data, "--scan-mib", "4")
+        self.assertFalse(result["scan_truncated"])
+        self.assertEqual(len(result["findings"]["secret_like"]), 1)
+
+
+class GhidraExportCompletionTests(TempDirCase):
+    """The wrapper must not call a partial or stale export a success. Uses a fake analyzeHeadless, so it needs no Ghidra."""
+
+    HEADER = "address,name,named,size_bytes,instructions,branches,calls,jumps,is_thunk,decompile_status,c_lines,gotos,autovars,c_file"
+
+    def fake_ghidra(self, body, exit_code):
+        support = self.tmp / "fake" / "support"
+        support.mkdir(parents=True, exist_ok=True)
+        script = support / "analyzeHeadless"
+        script.write_text("#!/bin/sh\ndir=$(echo \"$@\" | sed 's/.*ExportFunctions.java \\([^ ]*\\).*/\\1/')\nmkdir -p \"$dir\"\n"
+                          f"{body}\nexit {exit_code}\n")
+        script.chmod(0o755)
+        (self.tmp / "dummy.bin").write_bytes(b"x")
+
+    def export(self, outdir="out"):
+        env = dict(os.environ, GHIDRA_HOME=str(self.tmp / "fake"))
+        return subprocess.run([sys.executable, str(SCRIPTS / "ghidra_export.py"), str(self.tmp / "dummy.bin"), str(self.tmp / outdir)],
+                              capture_output=True, text=True, env=env)
+
+    row = '00100000,"FUN_00100000",false,10,3,0,0,0,false,ok,3,0,0,x.c'
+
+    @unittest.skipIf(os.name == "nt", "the fake Ghidra is a shell script")
+    def test_a_run_that_dies_halfway_is_partial_not_ok(self):
+        self.fake_ghidra(f"printf '%s\\n%s\\n' '{self.HEADER}' '{self.row}' > \"$dir/functions.csv\"", 1)
+        r = self.export()
+        self.assertIn("RESULT: PARTIAL", r.stdout)
+        self.assertNotIn("RESULT: OK", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    @unittest.skipIf(os.name == "nt", "the fake Ghidra is a shell script")
+    def test_stale_files_from_an_earlier_run_are_not_mistaken_for_output(self):
+        (self.tmp / "out").mkdir()
+        (self.tmp / "out" / "functions.csv").write_text(self.HEADER + "\n" + self.row + "\n")
+        (self.tmp / "out" / "summary.txt").write_text("program=old\n")
+        self.fake_ghidra(":", 0)
+        r = self.export()
+        self.assertIn("RESULT: FAILED", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    @unittest.skipIf(os.name == "nt", "the fake Ghidra is a shell script")
+    def test_a_finished_export_is_ok(self):
+        self.fake_ghidra(f"printf '%s\\n%s\\n' '{self.HEADER}' '{self.row}' > \"$dir/functions.csv\"; printf 'program=dummy\\nfunctions=1\\n' > \"$dir/summary.txt\"", 0)
+        r = self.export()
+        self.assertIn("RESULT: OK", r.stdout, r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+
+@unittest.skipUnless(HAVE_GCC and IS_LINUX, "needs gcc and GNU objdump on Linux")
+class VerifyMatchHygieneTests(TempDirCase):
+    def test_no_temporary_folders_are_left_behind(self):
+        (self.tmp / "t.c").write_text(SUM_TO)
+        subprocess.run(["gcc", "-O2", "-c", str(self.tmp / "t.c"), "-o", str(self.tmp / "t.o")], check=True)
+        for body in (SUM_TO, SUM_TO.replace("<=", "<"), "int sum_to(int n){return n +;}\n"):
+            (self.tmp / "c.c").write_text(body)
+            subprocess.run([sys.executable, str(SCRIPTS / "verify_match.py"), "--target", str(self.tmp / "t.o"), "--candidate", str(self.tmp / "c.c")],
+                           capture_output=True, text=True)
+        before = set(glob.glob(os.path.join(tempfile.gettempdir(), "verify-match-*")))
+        (self.tmp / "c.c").write_text(SUM_TO.replace("<=", "<"))
+        subprocess.run([sys.executable, str(SCRIPTS / "verify_match.py"), "--target", str(self.tmp / "t.o"), "--candidate", str(self.tmp / "c.c")],
+                       capture_output=True, text=True)
+        after = set(glob.glob(os.path.join(tempfile.gettempdir(), "verify-match-*")))
+        self.assertEqual(after - before, set())
+
+
+class VerifyTraceToleranceTests(TempDirCase):
+    def test_negative_and_non_finite_tolerances_are_rejected(self):
+        for rows in ("a.jsonl", "b.jsonl"):
+            (self.tmp / rows).write_text('{"t": 0, "x": 1.0}\n')
+        for value in ("-1", "nan", "inf"):
+            r = py(SCRIPTS / "verify_trace.py", "--original", self.tmp / "a.jsonl", "--rewrite", self.tmp / "b.jsonl", "--tolerance", value)
+            self.assertIn("RESULT: SETUP_ERROR", r.stdout, value)
+            self.assertEqual(r.returncode, 2)
+        r = py(SCRIPTS / "verify_trace.py", "--original", self.tmp / "a.jsonl", "--rewrite", self.tmp / "b.jsonl", "--key-tolerance", "x=-2")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+
+
 class RepoHygieneTests(unittest.TestCase):
     TEXT = {".py", ".md", ".json", ".yml", ".yaml", ".c", ".java", ".csv", ".txt", ".toml", ""}
     KEY_SHAPES = [re.compile(p) for p in (r"AKIA[0-9A-Z]{16}", r"ghp_[0-9A-Za-z]{36}", r"sk_live_[0-9a-zA-Z]{20}", r"xox[baprs]-[0-9A-Za-z-]{10,}",
@@ -596,6 +1001,8 @@ class GhidraExportTests(TempDirCase):
         with open(self.tmp / "out" / "functions.csv", newline="", encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         self.assertTrue(any(row["name"] == "twice" and row["decompile_status"] == "ok" for row in rows))
+        recorded = dict(line.split("=", 1) for line in (self.tmp / "out" / "summary.txt").read_text().splitlines() if "=" in line)
+        self.assertEqual(recorded["sha256"], hashlib.sha256((self.tmp / "p").read_bytes()).hexdigest())
 
     def test_missing_binary_is_a_setup_error(self):
         r = py(SCRIPTS / "ghidra_export.py", self.tmp / "nope", self.tmp / "out")

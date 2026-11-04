@@ -6,7 +6,7 @@ compatibility: Builds on the decompile-and-verify skill installed alongside it. 
 metadata:
   author: Nemesis-driod
   homepage: https://github.com/Nemesis-driod/decompile-and-verify
-  version: "0.4.0"
+  version: "0.4.1"
 ---
 
 # Decompile assessment
@@ -36,7 +36,7 @@ Managed builds (.NET, Java, Android) use the route in `decompile-and-verify/refe
 
 ## 3. Recovery pass (agent, under budget)
 
-For each crown jewel, run the `decompile-and-verify` loop and record it with `ledger.py add`, including attempts and seconds. Count a function as recovered only with both an oracle verdict and a plain-language statement of what the code does in the notes (for example "licence valid iff FNV-1a(key) % 97 == 42"). Never put secret values in notes. Also recover a random sample of about 20 functions to estimate general recoverability. Runs vary, so repeat each crown jewel up to three times when budget allows and report the median and the spread, not one run.
+For each crown jewel, run the `decompile-and-verify` loop and record it with `ledger.py add`, including attempts and seconds and `--build`, `--candidate` and `--corpus`, so the row is bound to its evidence. Count a function as recovered only with both an oracle verdict and a plain-language statement of what the code does in the notes (for example "licence valid iff FNV-1a(key) % 97 == 42"). Never put secret values in notes. Also recover a random sample of about 20 functions to estimate general recoverability. Runs vary, so repeat each crown jewel up to three times when budget allows and report the median and the spread, not one run.
 
 ## 4. Score
 
@@ -47,7 +47,7 @@ python3 scripts/score_exposure.py --functions work/export/functions.csv --triage
 
 The Recoverability Index is 100 times the weighted mean of four components, each 0 to 1 where 1 is most exposed: S symbols (0.2), L legibility of decompiled output (0.2), X embedded secrets, endpoints and build paths (0.2), R share of attempted functions an agent recovered (0.4). Without a ledger, R is dropped and the rest are re-weighted. Bands: 75 and above HIGH exposure, 40 to 74 MEDIUM, below 40 LOW.
 
-RI is a v0, uncalibrated communication device. Always show the components and the cost to recover beside it. If triage reports a packer or protector, or very high entropy, the static surface is inconclusive: test the unpacked or in-memory image.
+Only ledger rows pinned to this build (or not pinned at all, which are trusted as given) count toward R; rows verified against a different build are excluded and the output says so. RI is a v0, uncalibrated communication device. Always show the components and the cost to recover beside it. If triage reports a packer or protector, or very high entropy, the static surface is inconclusive: test the unpacked or in-memory image.
 
 ## 5. Report
 

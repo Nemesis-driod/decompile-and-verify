@@ -6,7 +6,7 @@ compatibility: Needs a shell and Python 3.9+. Native targets need Ghidra and a J
 metadata:
   author: Nemesis-driod
   homepage: https://github.com/Nemesis-driod/decompile-and-verify
-  version: "0.4.0"
+  version: "0.4.1"
 ---
 
 # Decompile and verify
@@ -24,7 +24,7 @@ The scripts live in `scripts/` next to this file (paths like `scripts/...` are r
 | `verify_run.py --original A --rewrite B --inputs dir` | differential oracle, whole program |
 | `verify_emulated.py --binary app --address 0x... --args ptr,i32 --ret u32 --candidate-lib c.so --symbol f` | differential oracle for ONE function inside the original binary, run under emulation (x86 and x86-64, ELF and PE) |
 | `verify_trace.py --original a.jsonl --rewrite b.jsonl` | trace-replay oracle: first diverging tick between the original and a port |
-| `ledger.py add work/ledger.csv ...` / `ledger.py summary work/ledger.csv` | one tidy row per function; attempts and seconds accumulate |
+| `ledger.py add\|summary\|check work/ledger.csv ...` | one tidy row per function; attempts and seconds accumulate; a row records the sha256 of the build, the candidate and the inputs it was verified with, and `check` flags rows that went stale |
 
 Managed and bytecode targets (.NET, Java, Android, Python, WebAssembly) skip Ghidra: see `references/routes.md`, which also says which routes have been run and which have not.
 
@@ -60,7 +60,7 @@ A match proves the same machine code, not the author's source: different source 
 3. Write `work/attempts/<function>/attempt_<n>.c`, one file per attempt, so a good attempt is never overwritten by a worse edit.
 4. Verify. Before the next attempt, state in one sentence why it failed and what the next change should fix. Change one thing at a time.
 5. Same failure three times: change approach (new hypothesis, different oracle, or ask the user). About ten attempts: mark `skipped` with the best diff and move on.
-6. Record the result with `ledger.py add work/ledger.csv --address 0x... --name ... --status matched|equivalent-tested|unverified|skipped --oracle "..." --attempts N --seconds S --notes "..."`. Never put secrets in notes. Commit only when the verdict improved. Record what you learned in `work/types.h` and `work/symbols.csv`; a shared header makes every later function cheaper.
+6. Record the result with `ledger.py add work/ledger.csv --address 0x... --name ... --status matched|equivalent-tested|unverified|skipped --oracle "..." --attempts N --seconds S --notes "..." --build <the binary> --candidate <the file you verified> --corpus <the inputs or cases>`. The three hashes bind the verdict to its evidence. Never put secrets in notes. Commit only when the verdict improved. Record what you learned in `work/types.h` and `work/symbols.csv`; a shared header makes every later function cheaper.
 
 ## Gotchas
 
@@ -75,12 +75,14 @@ A match proves the same machine code, not the author's source: different source 
 - `ctypes` and `dlopen` cannot load a PIE executable. Use `verify_emulated.py` for one function, or test the whole program.
 - Ghidra needs a full JDK (21+, with `javac`). With only a JRE it prints a misleading "unsupported java version".
 - Go binaries keep function names in `.gopclntab` after `strip`, so stripping does little for them.
+- A timeout is not behaviour: when both programs time out, `verify_run.py` says INCONCLUSIVE, not equivalent. It compares exit status and stdout only. A candidate can crash or hang; `verify_emulated.py` runs it in its own process and reports CANDIDATE_CRASH or CANDIDATE_TIMEOUT.
 - Static first. Running an unknown binary executes its code; use a throwaway VM or container if you must run it. `verify_run.py` runs both programs you give it; `verify_emulated.py` does not run the binary natively.
+- `decompile_status=ok` in `functions.csv` means Ghidra returned C, not that the C is right.
 - Decompiler output is a draft: it rarely compiles as-is and is full of `iVar1` and casts.
 
 ## Report
 
-End with: what was recovered and counts per status (`ledger.py summary`); the build's sha256; which oracle backed each function; what is unverified or skipped and why; tool versions and the exact commands to reproduce; the ledger and the log. Keep binaries and decompiled output under `work/` (gitignored) and commit your own notes, scripts and tests.
+Run `ledger.py check work/ledger.csv --build <binary>` first: a row whose candidate or inputs changed, or that was verified against another build, must be re-verified before it is reported. End with: what was recovered and counts per status (`ledger.py summary`); the build's sha256; which oracle backed each function; what is unverified or skipped and why; tool versions and the exact commands to reproduce; the ledger and the log. Keep binaries and decompiled output under `work/` (gitignored) and commit your own notes, scripts and tests.
 
 ## References
 

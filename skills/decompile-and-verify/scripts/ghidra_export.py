@@ -2,7 +2,8 @@
 """Export a function inventory and decompiled C for every function, using Ghidra headless (Windows, macOS, Linux).
 
 Usage: ghidra_export.py <binary> <outdir> [--max N] [--no-decompile] [--timeout SECONDS]
-Output: <outdir>/functions.csv, summary.txt, decompiled/<addr>_<name>.c, ghidra.log
+Output: <outdir>/functions.csv, summary.txt (written last: the completion marker), decompiled/<addr>_<name>.c, ghidra.log
+A previous export in <outdir> is deleted first, so old files can never be mistaken for this run's output.
 
 Ghidra: set GHIDRA_HOME to the folder that contains support/analyzeHeadless (or put analyzeHeadless on PATH).
 Ghidra needs a full JDK (21 or newer, with javac). A JRE alone makes it print a misleading
@@ -97,6 +98,9 @@ def main():
     scripts = Path(__file__).resolve().parent / "ghidra_scripts"
     project = Path(tempfile.mkdtemp(prefix="ghidra-proj-"))
     log_path = out / "ghidra.log"
+    for name in ("functions.csv", "summary.txt", "ghidra.log"):      # an old export must not pass for this run's output
+        (out / name).unlink(missing_ok=True)
+    shutil.rmtree(out / "decompiled", ignore_errors=True)
     print(f"ghidra_export: analyzing {binary.name} (large files take a while; log: {log_path})")
     command = [str(headless), str(project), "export", "-import", str(binary.resolve()), "-overwrite",
                "-analysisTimeoutPerFile", str(args.timeout), "-scriptPath", str(scripts),
@@ -109,19 +113,30 @@ def main():
     finally:
         shutil.rmtree(project, ignore_errors=True)
 
-    csv_path = out / "functions.csv"
-    if not csv_path.is_file() or csv_path.stat().st_size == 0:
+    csv_path, summary_path = out / "functions.csv", out / "summary.txt"
+    has_csv = csv_path.is_file() and csv_path.stat().st_size > 0
+    finished = summary_path.is_file()                      # ExportFunctions.java writes summary.txt last
+    if not (has_csv and finished):
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
-        print(f"RESULT: FAILED (Ghidra exited {code} and produced no functions.csv). Last log lines:")
+        if has_csv:
+            with open(csv_path, encoding="utf-8", errors="replace") as f:
+                rows = max(sum(1 for _ in f) - 1, 0)
+            print(f"RESULT: PARTIAL (Ghidra exited {code}; functions.csv has {rows} rows but the export did not finish, "
+                  "so the inventory is incomplete). Last log lines:")
+        else:
+            print(f"RESULT: FAILED (Ghidra exited {code} and produced no functions.csv). Last log lines:")
         print("\n".join(log_text.splitlines()[-25:]))
         if "unsupported java version" in log_text or "JDK path" in log_text or "JAVA_HOME" in log_text:
             print("HINT: Ghidra needs a full JDK 21+ with javac. Install one and set JAVA_HOME.")
         else:
-            print("HINT: unsupported format or architecture, a script compile error, or too little memory. Try --no-decompile first.")
+            print("HINT: unsupported format or architecture, a script compile error, a timeout, or too little memory. "
+                  "Try --no-decompile first.")
         sys.exit(1)
 
     print("RESULT: OK")
-    print((out / "summary.txt").read_text(encoding="utf-8").rstrip())
+    if code != 0:
+        print(f"WARNING: Ghidra exited with status {code} after the export finished.")
+    print(summary_path.read_text(encoding="utf-8").rstrip())
 
 
 if __name__ == "__main__":

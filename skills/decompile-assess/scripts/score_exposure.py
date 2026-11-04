@@ -69,22 +69,42 @@ def secret_exposure(tri):
     return x, ", ".join(parts)
 
 
-def recovery(ledger_path):
+def number(value, what, line, path):
+    try:
+        return float(value or 0)
+    except ValueError:
+        sys.exit(f"ERROR: ledger {path} line {line}: {what} {value!r} is not a number. Fix it, or run ledger.py summary to see all invalid rows.")
+
+
+def recovery(ledger_path, current_sha=""):
+    """Recovery rate from the ledger. Rows verified against a different build are not evidence about this one."""
     with open(ledger_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         missing = {"address", "name", "status", "attempts"} - set(reader.fieldnames or [])
         if missing:
             sys.exit(f"ERROR: ledger {ledger_path} is missing column(s) {sorted(missing)}. "
                      "Expected: address,name,status,oracle,attempts,seconds,notes")
-        rows = [r for r in reader if r.get("status", "").strip() in ATTEMPTED]
+        listed = [(n, r) for n, r in enumerate(reader, 2) if r.get("status", "").strip() in ATTEMPTED]
+    rows, other_build, unpinned = [], 0, 0
+    for n, r in listed:
+        pinned = (r.get("build_sha256") or "").strip().lower()
+        if pinned and current_sha and pinned != current_sha.lower():
+            other_build += 1
+            continue
+        unpinned += 0 if pinned else 1
+        rows.append((n, r))
     if not rows:
-        return None, "ledger has no attempted functions", {}
-    won = [r for r in rows if r["status"].strip() in RECOVERED]
-    attempts = sum(int(r.get("attempts") or 0) for r in rows)
-    seconds = sum(float(r.get("seconds") or 0) for r in rows)
+        why = (f"all {other_build} attempted rows were verified against a different build" if other_build
+               else "ledger has no attempted functions")
+        return None, why, {}
+    won = [(n, r) for n, r in rows if r["status"].strip() in RECOVERED]
+    attempts = sum(int(number(r.get("attempts"), "attempts", n, ledger_path)) for n, r in rows)
+    seconds = sum(number(r.get("seconds"), "seconds", n, ledger_path) for n, r in rows)
     stats = {"attempted": len(rows), "recovered": len(won), "attempts_total": attempts,
              "attempts_per_recovered": round(attempts / len(won), 1) if won else None, "seconds_total": seconds or None,
-             "unverified": sum(1 for r in rows if r["status"].strip() == "unverified")}
+             "unverified": sum(1 for n, r in rows if r["status"].strip() == "unverified"),
+             "evidence": {"rows_considered": len(rows), "pinned_to_this_build": len(rows) - unpinned, "unpinned": unpinned,
+                          "other_build_excluded": other_build}}
     return len(won) / len(rows), f"{len(won)} of {len(rows)} attempted functions recovered in {attempts} attempts", stats
 
 
@@ -111,7 +131,7 @@ def main():
         comp["L"], notes["L"] = legibility(rows)
     comp["X"], notes["X"] = secret_exposure(tri)
     if args.ledger:
-        r, notes["R"], stats = recovery(args.ledger)
+        r, notes["R"], stats = recovery(args.ledger, tri.get("sha256", ""))
         if r is not None:
             comp["R"] = r
 
@@ -134,10 +154,25 @@ def main():
         print(f"cost-to-recover    : {stats['attempts_total']} attempts for {stats['recovered']} recovered functions"
               f" ({stats['attempts_per_recovered']} per function)" + (f", {stats['seconds_total']:.0f}s" if stats.get("seconds_total") else "")
               + (f"; {stats['unverified']} unverified" if stats.get("unverified") else ""))
+    ev = stats.get("evidence") if stats else None
+    if ev:
+        line = f"evidence           : {ev['pinned_to_this_build']} of {ev['rows_considered']} ledger rows pinned to this build"
+        if ev["unpinned"]:
+            line += f"; {ev['unpinned']} not pinned (trusted as given)"
+        if ev["other_build_excluded"]:
+            line += f"; {ev['other_build_excluded']} excluded (verified against a different build)"
+        print(line)
+    elif args.ledger and "R" not in comp and notes.get("R", "").startswith("all "):
+        print(f"WARNING: {notes['R']}; none of them count here.")
+    if tri.get("scan_truncated"):
+        print("WARNING: triage scanned only part of the file; secrets, URLs and strings beyond that part were not examined.")
+    if tri.get("malformed"):
+        print("WARNING: the file header is malformed or truncated, so the format was not identified.")
     if args.json:
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump({"file": tri.get("file"), "components": comp, "notes": notes, "ri": round(ri, 1), "band": band(ri),
-                       "surface_inconclusive": inconclusive, "recovery": stats}, f, indent=2)
+                       "surface_inconclusive": inconclusive, "recovery": stats,
+                       "scan_truncated": bool(tri.get("scan_truncated")), "malformed": bool(tri.get("malformed"))}, f, indent=2)
         print(f"json               : {args.json}")
 
 

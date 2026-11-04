@@ -8,6 +8,7 @@ have a few hundred results (a small logistic regression on instructions, branche
 """
 import argparse
 import csv
+import os
 import re
 import signal
 import sys
@@ -24,6 +25,19 @@ if hasattr(signal, "SIGPIPE"):
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+def build_sha_from_summary(functions_csv):
+    """The sha256 that ghidra_export.py recorded in summary.txt next to functions.csv, or ''."""
+    summary = os.path.join(os.path.dirname(os.path.abspath(functions_csv)), "summary.txt")
+    try:
+        with open(summary, encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("sha256="):
+                    return line.split("=", 1)[1].strip().lower()
+    except OSError:
+        pass
+    return ""
+
+
 def norm_addr(text):
     return int(text.strip().lower().removeprefix("0x"), 16)
 
@@ -35,22 +49,37 @@ def main():
     ap.add_argument("--ledger")
     ap.add_argument("--out", default="worklist.csv")
     ap.add_argument("--min-instructions", type=int, default=3)
+    ap.add_argument("--build-sha256", help="sha256 of the binary under test (default: read from summary.txt next to functions.csv)")
     ap.add_argument("--unnamed-only", action="store_true",
                     help="skip functions Ghidra already named (library code it recognised, or symbols); use on builds with recognised libraries")
     args = ap.parse_args()
 
+    current = (args.build_sha256 or build_sha_from_summary(args.functions_csv)).strip().lower()
+    ignored = unpinned = 0
     done = set()
     if args.ledger:
         try:
             with open(args.ledger, newline="", encoding="utf-8") as f:
                 for row in csv.DictReader(f):
-                    if row.get("status", "").strip() in DONE:
-                        done.add(norm_addr(row["address"]))
+                    if row.get("status", "").strip() not in DONE:
+                        continue
+                    pinned = (row.get("build_sha256") or "").strip().lower()
+                    if pinned and current and pinned != current:
+                        ignored += 1                       # proven against a different build: says nothing about this one
+                        continue
+                    if not pinned:
+                        unpinned += 1
+                    done.add(norm_addr(row["address"]))
         except FileNotFoundError:
             print(f"note: ledger {args.ledger} does not exist yet; starting fresh", file=sys.stderr)
         except (KeyError, ValueError) as e:
             sys.exit(f"ERROR: ledger must have columns address,name,status,oracle,attempts,notes ({e!r})")
 
+    if ignored:
+        print(f"note: ignored {ignored} ledger row(s) that were verified against a different build", file=sys.stderr)
+    if unpinned and current:
+        print(f"note: {unpinned} ledger row(s) are not pinned to a build and were trusted; re-add them with --build to pin them",
+              file=sys.stderr)
     rows = []
     try:
         with open(args.functions_csv, newline="", encoding="utf-8") as f:

@@ -149,6 +149,14 @@ def main():
         if rec.get("unverified"):
             cost += f"; {rec['unverified']} unverified"
         L.append(f"Cost to recover: {cost}.")
+        ev = rec.get("evidence")
+        if ev:
+            line = f"Evidence: {ev['pinned_to_this_build']} of {ev['rows_considered']} ledger rows are pinned to this build"
+            if ev["unpinned"]:
+                line += f"; {ev['unpinned']} are not pinned and were trusted as given"
+            if ev["other_build_excluded"]:
+                line += f"; {ev['other_build_excluded']} were verified against a different build and are excluded"
+            L.append(line + ".")
     else:
         L.append("Cost to recover: not measured (no recovery pass was run).")
     if exp.get("surface_inconclusive"):
@@ -174,6 +182,11 @@ def main():
           f"debug info: {'yes' if tri.get('has_debug_info') else 'no'}",
           f"- Protection hints: {', '.join(tri.get('protection_hints') or []) or 'none found'}",
           f"- Entropy: {tri.get('entropy_overall')}/8 overall, {tri.get('high_entropy_block_ratio', 0):.0%} of 4 KB blocks above 7.5"]
+    if tri.get("scan_truncated"):
+        L.append(f"- **Scan limit:** only the first {tri.get('scanned_bytes', 0) / (1 << 20):.0f} MiB of {tri.get('size_bytes', 0) / (1 << 20):.1f} MiB were scanned. "
+                 "Strings, entropy and secret patterns cover only that part; findings beyond it were not examined.")
+    if tri.get("malformed"):
+        L.append(f"- **Malformed header:** {tri.get('malformed_reason')}. The format was not identified; only strings and entropy are reliable.")
     for label, items in (("URLs", f.get("urls", [])), ("IPs", f.get("ips", [])), ("Build paths", f.get("build_paths", []))):
         if items:
             L.append(f"- {label}: " + "; ".join(f"`{cell(i)}`" for i in items[:10]))
@@ -183,11 +196,20 @@ def main():
     L += ["", "## Recovery results", ""]
     if ledger:
         rows = []
-        for r in ledger:
-            secs = float(r.get("seconds") or 0)
+        current_sha = (tri.get("sha256") or "").lower()
+        for number, r in enumerate(ledger, 2):
+            try:
+                secs = float(r.get("seconds") or 0)
+                int(r.get("attempts") or 0)
+            except ValueError:
+                fail(f"ledger line {number} has a non-numeric attempts or seconds value ({r.get('attempts')!r}, {r.get('seconds')!r}). "
+                     "Fix it; ledger.py summary lists every invalid row.")
+            pinned = [w for w, col in (("build", "build_sha256"), ("candidate", "candidate_sha256"), ("corpus", "corpus_sha256")) if r.get(col)]
+            if r.get("build_sha256") and current_sha and r["build_sha256"].lower() != current_sha:
+                pinned = ["OTHER BUILD: not counted"]
             rows.append([r.get("name"), r.get("address"), r.get("oracle") or "", r.get("attempts"),
-                         f"{secs / 60:.1f}" if secs else "n/a", r.get("status"), r.get("notes") or ""])
-        L += table(["Function", "Address", "Oracle", "Attempts", "Minutes", "Status", "What the recovered code does"], rows)
+                         f"{secs / 60:.1f}" if secs else "n/a", r.get("status"), ", ".join(pinned) or "none", r.get("notes") or ""])
+        L += table(["Function", "Address", "Oracle", "Attempts", "Minutes", "Status", "Pinned to", "What the recovered code does"], rows)
         open_rows = [r for r in ledger if r.get("status") in ("skipped", "unverified")]
         L += ["", "Not recovered, or recovered without a check: " + (", ".join(f"{r['name']} ({r['status']})" for r in open_rows) or "none") + "."]
     else:

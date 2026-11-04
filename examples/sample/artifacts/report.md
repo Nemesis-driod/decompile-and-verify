@@ -1,6 +1,6 @@
 # Decompile exposure report
 
-**Client / owner:** Example Corp (toy sample)  **Requested by:** n/a (demo)  **Date:** 2026-10-09
+**Client / owner:** Example Corp (toy sample)  **Requested by:** n/a (demo)  **Date:** 2026-10-15
 **Build:** `sample_stripped` (sha256 `eb38a07fd19396c0e7442a694b5bcae659f8662db4c79e06fd9365d551c9182c`, 14,472 bytes)  **Tester:** agent-style run; see ledger.csv
 **Tool versions and notes:** Ghidra 12.1.4, gcc 13.3.0, Python 3.12.3
 
@@ -8,6 +8,7 @@
 
 Recoverability Index: **76/100 (HIGH)** (v0, uncalibrated), from S 0.00, L 1.00, X 0.80, R 1.00.
 Cost to recover: 4 attempts for 4 recovered function(s) (1.0 per function).
+Evidence: 4 of 4 ledger rows are pinned to this build.
 
 Key findings, in order of effect:
 
@@ -44,12 +45,12 @@ Requested by: n/a (toy sample shipped with the repository).
 
 ## Recovery results
 
-| Function | Address | Oracle | Attempts | Minutes | Status | What the recovered code does |
-|---|---|---|---|---|---|---|
-| FUN_00101250 | 0x101250 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | FNV-1a over 16 bytes (constants 0x811c9dc5 and 0x1000193); masked to 31 bits |
-| FUN_00101280 | 0x101280 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | licence check: length 16 and checksum % 97 == 42 |
-| FUN_001010a0 | 0x1010a0 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | main: prints the activation endpoint and an api_key config string |
-| FUN_001012b0 | 0x1012b0 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | returns a compiler-folded constant (90.0) |
+| Function | Address | Oracle | Attempts | Minutes | Status | Pinned to | What the recovered code does |
+|---|---|---|---|---|---|---|---|
+| FUN_00101250 | 0x101250 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | build, candidate, corpus | FNV-1a over 16 bytes (constants 0x811c9dc5 and 0x1000193); masked to 31 bits |
+| FUN_00101280 | 0x101280 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | build, candidate, corpus | licence check: length 16 and checksum % 97 == 42 |
+| FUN_001010a0 | 0x1010a0 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | build, candidate, corpus | main: prints the activation endpoint and an api_key config string |
+| FUN_001012b0 | 0x1012b0 | differential (whole program; 40 inputs) | 1 | n/a | equivalent-tested | build, candidate, corpus | returns a compiler-folded constant (90.0) |
 
 Not recovered, or recovered without a check: none.
 

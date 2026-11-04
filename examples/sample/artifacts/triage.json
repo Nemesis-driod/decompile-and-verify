@@ -9,6 +9,8 @@
   "has_debug_info": false,
   "go_binary": false,
   "kind": "native",
+  "scanned_bytes": 14472,
+  "scan_truncated": false,
   "runtime_hints": [
     "GCC"
   ],

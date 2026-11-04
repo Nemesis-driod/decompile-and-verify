@@ -21,6 +21,14 @@
     "attempts_total": 4,
     "attempts_per_recovered": 1.0,
     "seconds_total": null,
-    "unverified": 0
-  }
+    "unverified": 0,
+    "evidence": {
+      "rows_considered": 4,
+      "pinned_to_this_build": 4,
+      "unpinned": 0,
+      "other_build_excluded": 0
+    }
+  },
+  "scan_truncated": false,
+  "malformed": false
 }

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Static triage of a binary: identity, format, protection hints, notable strings, suggested route.
 
-Usage: triage.py <file> [--json OUT.json]
-Stdlib only. Never executes the file. Secret-like values are redacted in all output.
+Usage: triage.py <file> [--json OUT.json] [--scan-mib N]
+Stdlib only. Never executes the file. Strings, entropy and secret patterns cover the first 32 MiB unless --scan-mib says
+otherwise; the output says when part of the file was not scanned. Secret-like values are redacted in all output.
 """
 import argparse
 import hashlib
@@ -179,6 +180,18 @@ def parse_zip(path):
 
 
 def detect(path):
+    """Identify the format. Malformed or truncated headers give a result that says so instead of an exception."""
+    try:
+        return detect_raw(path)
+    except (struct.error, IndexError, ValueError, OverflowError, EOFError, zipfile.BadZipFile) as e:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        label = "ELF" if head == b"\x7fELF" else "PE" if head[:2] == b"MZ" else "ZIP" if head == b"PK\x03\x04" else "file"
+        return os.path.getsize(path), {"format": f"{label} (malformed or truncated)", "kind": "unknown", "malformed": True,
+                                       "malformed_reason": f"{type(e).__name__}: {e}"}
+
+
+def detect_raw(path):
     size = os.path.getsize(path)
     with open(path, "rb") as f:
         head = f.read(16)
@@ -229,6 +242,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("file")
     ap.add_argument("--json", metavar="OUT", help="also write machine-readable results here")
+    ap.add_argument("--scan-mib", type=float, default=32, help="MiB from the start of the file to scan for strings, entropy and secrets (default 32)")
     args = ap.parse_args()
 
     if os.path.isdir(args.file):
@@ -236,9 +250,13 @@ def main():
     if not os.path.isfile(args.file):
         sys.exit(f"ERROR: file not found: {args.file}")
 
+    if not args.scan_mib > 0:
+        sys.exit("ERROR: --scan-mib must be a positive number.")
+    scan_limit = int(args.scan_mib * 1024 * 1024)
     size, info = detect(args.file)
     with open(args.file, "rb") as f:
-        data = f.read(SCAN_LIMIT)
+        data = f.read(scan_limit)
+    scan_truncated = size > len(data)
     sha = hashlib.sha256()
     with open(args.file, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
@@ -273,6 +291,7 @@ def main():
                 findings["secret_like"].append({"type": kind, "redacted": redact(m.group(0), kind)})
 
     result = {"file": os.path.basename(args.file), "sha256": sha.hexdigest(), "size_bytes": size, **info,
+              "scanned_bytes": len(data), "scan_truncated": scan_truncated,
               "runtime_hints": runtime, "compiler_banner": compiler.group(0) if compiler else None,
               "protection_hints": protections, "entropy_overall": overall, "high_entropy_block_ratio": high_ratio,
               "route": ROUTES.get(info.get("kind", "unknown"), ROUTES["unknown"]), "findings": findings}
@@ -284,6 +303,11 @@ def main():
     print(f"== triage: {result['file']} ==")
     print(f"sha256     : {result['sha256']}")
     print(f"size       : {size:,} bytes")
+    if scan_truncated:
+        print(f"scan       : only the first {len(data) / (1 << 20):.0f} MiB of {size / (1 << 20):.1f} MiB were scanned; strings, entropy and "
+              "secret patterns cover only that part (raise --scan-mib)")
+    if result.get("malformed"):
+        print(f"parse      : the header is malformed or truncated ({result['malformed_reason']}); only strings and entropy are reliable")
     print(f"format     : {result['format']} {result.get('bits', '')}{'-bit' if result.get('bits') else ''} {result.get('arch', '')}".rstrip())
     if sym:
         print(f"symbols    : {sym}")

@@ -16,7 +16,8 @@
 | Verdict | Proves | Does not prove |
 |---|---|---|
 | `MATCH` (matching) | your source compiles to the same instructions with that toolchain | that it is the author's source, or behaviour under another toolchain |
-| `EQUIVALENT_ON n` (`verify_run.py`) | same outputs and exit codes on those n whole-program inputs | anything about other inputs |
+| `EQUIVALENT_ON n` (`verify_run.py`) | same exit status and stdout on those n whole-program inputs | stderr, files written, network or other side effects, or any other input |
+| `INCONCLUSIVE` (`verify_run.py`) | nothing: both programs timed out, or both failed identically on every input | equivalence in either direction |
 | `EQUIVALENT_ON n cases` (`verify_emulated.py`) | the original function's machine code and your candidate agree on those n argument sets (return value and pointer buffers) | behaviour on other arguments, or side effects on memory you did not pass in |
 | `TRACE_MATCH n ticks` | the port reproduced the recorded state tick by tick for that recorded input | other inputs, or state you did not record |
 | rebuilt file's hash equals the original's | a matching build of the whole file | nothing else is needed; this is the strongest result |
@@ -25,7 +26,7 @@
 
 ## Pin the target
 
-Record the sha256 of the exact binary in the log and in every report, and say which build a claim is about. A result for one build says nothing about the next release. Separate what you observed (read from the bytes, or seen when run) from what you inferred, and say which each statement is.
+Record the sha256 of the exact binary in the log and in every report, and say which build a claim is about. `ledger.py add --build --candidate --corpus` stores the hashes of the build, the verified source and the inputs in the row, and `ledger.py check` reports rows that went stale: a candidate edited after verification, changed or missing inputs, or a row verified against a different build. `rank_functions.py` and `score_exposure.py` ignore rows from another build. A result for one build says nothing about the next release. Separate what you observed (read from the bytes, or seen when run) from what you inferred, and say which each statement is.
 
 ## Matching
 
@@ -38,6 +39,8 @@ Read the diff, not just the percentage, and change one thing per attempt. Typica
 ```bash
 python3 scripts/verify_run.py --original ./orig --rewrite ./new --inputs inputs/ --mode stdin     # or: arg | arg-text   (Windows: python)
 ```
+
+A timeout is not behaviour. If both programs time out on an input, that input is `INCONCLUSIVE`; if only one does, that is a difference. `--min-inputs` warns when there are few inputs, and `--strict` turns the warning into a failure (`TOO_FEW_INPUTS`) and rejects runs where both programs failed identically on every input.
 
 Choose inputs on purpose: boundaries first (0, negative, maximum, empty, off-by-one around every comparison in the code), then random, then inputs from real usage. Do not derive every input from the decompiled code you are testing. Differential fuzzing (AFL++ or libFuzzer generating inputs, both implementations compared on each) finds what hand-picked inputs miss.
 
@@ -55,9 +58,11 @@ python3 scripts/verify_emulated.py --binary app.exe --address 0x00406af0 --args 
     --candidate-py recovered.py:validate_image_base --cases header_cases.jsonl
 ```
 
-Boundary values for every argument and seeded random cases are generated for you; `--cases` adds your own (JSON lines, `ptr` values as hex strings), which you need for functions that only do something interesting on structured input. Pointer arguments get a buffer of `--ptr-len` bytes and the buffer is compared after the call, so output buffers are checked.
+Boundary values for every argument, pairwise combinations of the first three arguments' boundary values, and seeded random cases are generated for you. They do not find a bug that needs one specific constant (`x == 7 && y == 13`); `--cases` adds your own (JSON lines, `ptr` values as hex strings), which you need for functions that only do something interesting on structured input. Pointer arguments get a buffer of `--ptr-len` bytes and the buffer is compared after the call, so output buffers are checked.
 
 Verified on: stripped x86-64 ELF functions (integer, pointer in, pointer out, double), a 32-bit ELF with cdecl, a function from a real 32-bit Windows executable, and hand-built PE32, PE32+ (Win64) and fastcall files. Not supported: ARM, MIPS and other architectures, Mach-O, 32-bit floating-point arguments or returns (x87), stack-passed arguments beyond the registers on x86-64.
+
+The candidate runs in a separate process. A crash is reported as `CANDIDATE_CRASH`, an endless loop as `CANDIDATE_TIMEOUT` (`--candidate-timeout`), and a Python candidate that raises as a difference, instead of ending the verifier without a verdict. A pointer return type is not supported, because the emulated and the native address spaces differ.
 
 Limits: the function must be a leaf, or call only code inside the image. A call into an import or libc ends the run with `EMULATION_ERROR` and a hint. State that persists between calls (globals) is reset for every case, so stateful functions need a whole-program test.
 
@@ -83,6 +88,6 @@ When you can rebuild the whole binary with the original toolchain, compare the r
 
 - Reject inline assembly and raw data directives (`verify_match.py` does).
 - Hold out inputs. Do not tune the rewrite on the whole test set.
-- Make failures loud. The scripts print `RESULT:` with a fixed vocabulary: `MATCH`, `NOT_MATCH`, `BUILD_FAILED`, `REJECTED`, `EQUIVALENT_ON`, `DIFFERS`, `EMULATION_ERROR`, `TRACE_MATCH`, `TRACE_DIVERGES`, `TRACE_MISALIGNED`, `SETUP_ERROR`. Treat anything but a success as a failure.
+- Make failures loud. The scripts print `RESULT:` with a fixed vocabulary: `MATCH`, `NOT_MATCH`, `BUILD_FAILED`, `REJECTED`, `EQUIVALENT_ON`, `DIFFERS`, `INCONCLUSIVE`, `TOO_FEW_INPUTS`, `EMULATION_ERROR`, `CANDIDATE_CRASH`, `CANDIDATE_TIMEOUT`, `TRACE_MATCH`, `TRACE_DIVERGES`, `TRACE_MISALIGNED`, `SETUP_ERROR`. Treat anything but a success as a failure.
 - Limit output. The first 40 diff lines are enough; ask for more when you need them.
 - Re-run the oracle after every cleanup or rename, and commit only when the verdict improves.

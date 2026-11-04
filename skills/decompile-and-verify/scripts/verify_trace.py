@@ -73,6 +73,11 @@ def main():
     ap.add_argument("--show", type=int, default=3, help="how many diverging ticks to print")
     args = ap.parse_args()
 
+    def valid_tolerance(value):
+        return math.isfinite(value) and value >= 0
+
+    if not valid_tolerance(args.tolerance):
+        fail("RESULT: SETUP_ERROR\n--tolerance must be a finite number that is not negative.")
     per_key = {}
     for item in args.key_tolerance:
         key, _, tol = item.partition("=")
@@ -80,6 +85,8 @@ def main():
             per_key[key] = float(tol)
         except ValueError:
             fail(f"RESULT: SETUP_ERROR\n--key-tolerance expects KEY=NUMBER (got {item!r})")
+        if not valid_tolerance(per_key[key]):
+            fail(f"RESULT: SETUP_ERROR\n--key-tolerance for {key!r} must be a finite number that is not negative.")
 
     a, b = load(args.original), load(args.rewrite)
     shared = sorted(set().union(*[set(r) for r in a]) & set().union(*[set(r) for r in b]))

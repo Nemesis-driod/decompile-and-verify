@@ -1,7 +1,8 @@
 // ExportFunctions.java - Ghidra headless post-script. Plain Java, so it runs on any Ghidra with a JDK
 // and needs no Python bridge (Jython vs PyGhidra differs between Ghidra versions).
 // Args: <outdir> [maxFunctions (0 = all)] [decompile 1|0] [timeoutSecondsPerFunction]
-// Writes: <outdir>/functions.csv, <outdir>/summary.txt, <outdir>/decompiled/<addr>_<name>.c
+// Writes: <outdir>/functions.csv, <outdir>/decompiled/<addr>_<name>.c and, LAST, <outdir>/summary.txt.
+// summary.txt is the completion marker: if it is missing, the export did not finish.
 //@category Decompile
 
 import ghidra.app.decompiler.DecompInterface;
@@ -97,15 +98,16 @@ public class ExportFunctions extends GhidraScript {
                     }
                 }
 
-                csv.println(f.getEntryPoint() + ",\"" + f.getName().replace("\"", "\"\"") + "\","
+                csv.println(field(f.getEntryPoint().toString()) + "," + quote(f.getName()) + ","
                         + isNamed + "," + f.getBody().getNumAddresses() + "," + instructions + ","
                         + branches + "," + calls + "," + jumps + "," + f.isThunk() + ","
-                        + status + "," + cLines + "," + gotos + "," + autoVars + "," + cFile);
+                        + field(status) + "," + cLines + "," + gotos + "," + autoVars + "," + field(cFile));
             }
         }
 
         try (PrintWriter sum = new PrintWriter(new File(outDir, "summary.txt"), "UTF-8")) {
             sum.println("program=" + currentProgram.getName());
+            sum.println("sha256=" + currentProgram.getExecutableSHA256());
             sum.println("format=" + currentProgram.getExecutableFormat());
             sum.println("language=" + currentProgram.getLanguageID());
             sum.println("compiler=" + currentProgram.getCompilerSpec().getCompilerSpecID());
@@ -117,6 +119,16 @@ public class ExportFunctions extends GhidraScript {
         }
         println("ExportFunctions: " + total + " functions, " + named + " named, " + okCount + " decompiled, "
                 + failCount + " failed -> " + outDir);
+    }
+
+    /** Always-quoted CSV field (function names may contain almost anything). */
+    private static String quote(String s) {
+        return "\"" + s.replace("\"", "\"\"") + "\"";
+    }
+
+    /** CSV field, quoted only when it has to be. */
+    private static String field(String s) {
+        return (s.indexOf(',') >= 0 || s.indexOf('"') >= 0 || s.indexOf('\n') >= 0 || s.indexOf('\r') >= 0) ? quote(s) : s;
     }
 
     private static int count(Pattern p, String s) {
