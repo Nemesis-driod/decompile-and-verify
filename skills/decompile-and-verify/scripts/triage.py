@@ -250,8 +250,13 @@ def main():
     if not os.path.isfile(args.file):
         sys.exit(f"ERROR: file not found: {args.file}")
 
-    if not args.scan_mib > 0:
-        sys.exit("ERROR: --scan-mib must be a positive number.")
+    try:
+        with open(args.file, "rb"):
+            pass
+    except OSError as e:
+        sys.exit(f"ERROR: cannot read {args.file}: {e.strerror or e}")
+    if not (math.isfinite(args.scan_mib) and 0 < args.scan_mib <= 4096):
+        sys.exit("ERROR: --scan-mib must be a number greater than 0 and at most 4096.")
     scan_limit = int(args.scan_mib * 1024 * 1024)
     size, info = detect(args.file)
     with open(args.file, "rb") as f:

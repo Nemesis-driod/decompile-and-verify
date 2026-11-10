@@ -19,6 +19,7 @@ Exit codes: 0 equivalent on these inputs; 1 differs, inconclusive, or too few in
 """
 import argparse
 import difflib
+import math
 import os
 import shlex
 import signal
@@ -75,8 +76,8 @@ def main():
     ap.add_argument("--strict", action="store_true", help="enforce --min-inputs and reject runs where both programs always fail")
     args = ap.parse_args()
 
-    if args.timeout <= 0:
-        fail("RESULT: SETUP_ERROR\n--timeout must be a positive number of seconds.")
+    if not (math.isfinite(args.timeout) and 0 < args.timeout <= 86400):
+        fail("RESULT: SETUP_ERROR\n--timeout must be a number of seconds greater than 0 and at most 86400.")
     if not os.path.isdir(args.inputs):
         fail(f"RESULT: SETUP_ERROR\n--inputs must be a directory of test-case files: {args.inputs}")
     cases = sorted(os.path.join(args.inputs, n) for n in os.listdir(args.inputs) if os.path.isfile(os.path.join(args.inputs, n)))

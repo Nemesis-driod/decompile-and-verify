@@ -81,6 +81,8 @@ def main():
     ap.add_argument("--timeout", type=int, default=600, help="Ghidra analysis timeout in seconds (default 600)")
     args = ap.parse_args()
 
+    if args.timeout <= 0 or args.max < 0:
+        fail("RESULT: SETUP_ERROR\n--timeout must be greater than 0 and --max cannot be negative.")
     binary = Path(args.binary)
     if not binary.is_file():
         fail(f"RESULT: SETUP_ERROR\nbinary not found: {binary}")

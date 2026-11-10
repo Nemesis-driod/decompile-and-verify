@@ -13,6 +13,7 @@ import argparse
 import csv
 import datetime
 import json
+import math
 import re
 import signal
 import sys
@@ -201,6 +202,8 @@ def main():
             try:
                 secs = float(r.get("seconds") or 0)
                 int(r.get("attempts") or 0)
+                if not math.isfinite(secs):
+                    raise ValueError("non-finite seconds")
             except ValueError:
                 fail(f"ledger line {number} has a non-numeric attempts or seconds value ({r.get('attempts')!r}, {r.get('seconds')!r}). "
                      "Fix it; ledger.py summary lists every invalid row.")

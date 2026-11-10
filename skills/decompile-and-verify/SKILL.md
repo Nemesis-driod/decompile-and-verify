@@ -6,7 +6,7 @@ compatibility: Needs a shell and Python 3.9+. Native targets need Ghidra and a J
 metadata:
   author: Nemesis-driod
   homepage: https://github.com/Nemesis-driod/decompile-and-verify
-  version: "0.4.1"
+  version: "0.4.2"
 ---
 
 # Decompile and verify

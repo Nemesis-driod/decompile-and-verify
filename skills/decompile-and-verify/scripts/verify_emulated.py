@@ -52,6 +52,8 @@ SCRATCH, SCRATCH_SIZE = 0x20000000, 0x100000
 TLS, TLS_SIZE = 0x6E000000, 0x2000
 ELF_DYN_BASE = 0x10000000
 MAX_HEADERS = 256
+MAX_SECONDS = 86400            # one day: larger values only hide a hang
+MAX_INSNS = 1 << 40
 
 INT_TYPES = {"i8": (8, True), "u8": (8, False), "i16": (16, True), "u16": (16, False),
              "i32": (32, True), "u32": (32, False), "i64": (64, True), "u64": (64, False)}
@@ -126,7 +128,10 @@ def load_elf(data):
         else:
             ptype, offset, vaddr, _, filesz, memsz, _, _ = struct.unpack_from("<IIIIIIII", data, at)
         if ptype == 1:
-            img.add(img.delta + vaddr, max(memsz, 0), view[offset:offset + min(filesz, memsz)] if offset <= len(data) else view[0:0])
+            if filesz > memsz or offset + filesz > len(data):
+                raise ValueError(f"segment {i} claims file bytes 0x{offset:x}-0x{offset + filesz:x}, but the file has only "
+                                 f"0x{len(data):x} bytes (it is truncated or corrupt)")
+            img.add(img.delta + vaddr, memsz, view[offset:offset + filesz])
     return img
 
 
@@ -147,11 +152,16 @@ def load_pe(data):
     img = Image("pe", 64 if is64 else 32, 0, False)
     img.image_base = image_base
     view = memoryview(data)
+    if size_of_headers > len(data):
+        raise ValueError(f"the headers claim 0x{size_of_headers:x} bytes, but the file has only 0x{len(data):x} (it is truncated or corrupt)")
     img.add(image_base, size_of_headers, view[:size_of_headers])
     for i in range(nsec):
         at = opt + opt_size + i * 40
         vsize, vaddr, rawsize, rawptr = struct.unpack_from("<IIII", data, at + 8)
-        img.add(image_base + vaddr, max(vsize, rawsize), view[rawptr:rawptr + rawsize] if rawptr <= len(data) else view[0:0])
+        if rawsize and rawptr + rawsize > len(data):
+            raise ValueError(f"section {i} claims raw data 0x{rawptr:x}-0x{rawptr + rawsize:x}, but the file has only "
+                             f"0x{len(data):x} bytes (it is truncated or corrupt)")
+        img.add(image_base + vaddr, max(vsize, rawsize), view[rawptr:rawptr + rawsize] if rawsize else view[0:0])
     return img
 
 
@@ -190,13 +200,18 @@ def wrap(kind, value):
     return value - (1 << width) if signed and value >= 1 << (width - 1) else value
 
 
+def ramp(n):
+    """0, 1, 2 ... 255, 0, 1 ... (bytes(range(n)) raises for n > 256)."""
+    return bytes(i & 0xFF for i in range(n))
+
+
 def base_value(kind, ptr_len):
     return bytes(ptr_len) if kind == "ptr" else (0.0 if kind == "f64" else 0)
 
 
 def small_values(kind, ptr_len):
     if kind == "ptr":
-        return [bytes(ptr_len), b"\xff" * ptr_len, bytes(range(ptr_len))]
+        return [bytes(ptr_len), b"\xff" * ptr_len, ramp(ptr_len)]
     if kind == "f64":
         return [0.0, 1.0, -1.0, 0.5, 1e300]
     width, signed = INT_TYPES[kind]
@@ -209,7 +224,7 @@ def boundary_cases(kinds, ptr_len):
     cases = [list(base)]
     for i, kind in enumerate(kinds):
         if kind == "ptr":
-            variants = [b"\xff" * ptr_len, bytes(range(ptr_len)), bytes((0x80 + j) & 0xFF for j in range(ptr_len)), b"\x01" * ptr_len]
+            variants = [b"\xff" * ptr_len, ramp(ptr_len), bytes((0x80 + j) & 0xFF for j in range(ptr_len)), b"\x01" * ptr_len]
         elif kind == "f64":
             variants = [0.0, -0.0, 1.0, -1.0, 0.5, 2.5, 1e-300, 1e300, math.pi, 100.0, 255.0]
         else:
@@ -258,19 +273,51 @@ def random_cases(kinds, ptr_len, count, seed):
     return cases
 
 
+def case_value(kind, value, where):
+    """Check one value from a --cases file against its declared type. Raises ValueError with a precise message."""
+    if kind == "ptr":
+        if not isinstance(value, str):
+            raise ValueError(f"{where}: expected a hex string, got {value!r}")
+        try:
+            return bytes.fromhex(value)
+        except ValueError:
+            raise ValueError(f"{where}: {value[:20]!r} is not a valid hex string")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{where}: expected a number, got {value!r}")
+    if kind == "f64":
+        try:
+            return float(value)
+        except OverflowError:
+            raise ValueError(f"{where}: {value!r} does not fit a double")
+    if not isinstance(value, int):
+        raise ValueError(f"{where}: expected a whole number, got {value!r}")
+    width, _ = INT_TYPES[kind]
+    low, high = -(1 << (width - 1)), (1 << width) - 1
+    if not low <= value <= high:
+        raise ValueError(f"{where}: {value} does not fit {kind} (allowed {low} to {high})")
+    return wrap(kind, value)
+
+
 def file_cases(path, kinds):
-    cases = []
     try:
         with open(path, encoding="utf-8") as f:
-            for number, line in enumerate(f, 1):
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                if not isinstance(row, list) or len(row) != len(kinds):
-                    fail(f"RESULT: SETUP_ERROR\n{path} line {number} must be an array of {len(kinds)} values (--args has {len(kinds)}).")
-                cases.append([bytes.fromhex(v) if k == "ptr" else v for k, v in zip(kinds, row)])
+            lines = f.read().splitlines()
     except (OSError, ValueError) as e:
         fail(f"RESULT: SETUP_ERROR\ncannot read cases from {path}: {e}")
+    cases = []
+    for number, line in enumerate(lines, 1):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError as e:
+            fail(f"RESULT: SETUP_ERROR\n{path} line {number} is not valid JSON ({e})")
+        if not isinstance(row, list) or len(row) != len(kinds):
+            fail(f"RESULT: SETUP_ERROR\n{path} line {number} must be an array of {len(kinds)} values (--args has {len(kinds)}).")
+        try:
+            cases.append([case_value(k, v, f"{path} line {number}, argument {i} ({k})") for i, (k, v) in enumerate(zip(kinds, row), 1)])
+        except ValueError as e:
+            fail(f"RESULT: SETUP_ERROR\n{e}")
     return cases
 
 
@@ -578,8 +625,16 @@ def main():
         fail(f"RESULT: SETUP_ERROR\nunknown return type '{args.ret}'. Use void, f64 or an integer type (i8 u8 i16 u16 i32 u32 i64 u64).")
     if not (math.isfinite(args.float_tol) and args.float_tol >= 0):
         fail("RESULT: SETUP_ERROR\n--float-tol must be a finite number that is not negative.")
-    if args.candidate_timeout <= 0 or args.ptr_len < 0 or args.random < 0 or args.max_insns <= 0:
-        fail("RESULT: SETUP_ERROR\n--candidate-timeout, --max-insns must be positive; --ptr-len and --random cannot be negative.")
+    if not (math.isfinite(args.candidate_timeout) and 0 < args.candidate_timeout <= MAX_SECONDS):
+        fail(f"RESULT: SETUP_ERROR\n--candidate-timeout must be a number of seconds greater than 0 and at most {MAX_SECONDS}.")
+    if not 1 <= args.max_insns <= MAX_INSNS:
+        fail(f"RESULT: SETUP_ERROR\n--max-insns must be between 1 and {MAX_INSNS}.")
+    if args.ptr_len < 0 or args.random < 0 or args.show < 0:
+        fail("RESULT: SETUP_ERROR\n--ptr-len, --random and --show cannot be negative.")
+    pointer_args = sum(1 for k in kinds if k == "ptr")
+    if pointer_args and ((args.ptr_len + 31) & ~15) * pointer_args > SCRATCH_SIZE:
+        fail(f"RESULT: SETUP_ERROR\n--ptr-len {args.ptr_len} is too large for {pointer_args} pointer argument(s): the emulator reserves "
+             f"{SCRATCH_SIZE // 1024} KiB for pointer buffers (about {SCRATCH_SIZE // pointer_args - 32} bytes each at most).")
     if bool(args.candidate_lib) == bool(args.candidate_py):
         fail("RESULT: SETUP_ERROR\nGive a candidate: --candidate-lib LIB --symbol NAME, or --candidate-py module.py:function")
     if args.candidate_lib and not args.symbol:

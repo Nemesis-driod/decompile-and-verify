@@ -64,6 +64,8 @@ Verified on: stripped x86-64 ELF functions (integer, pointer in, pointer out, do
 
 The candidate runs in a separate process. A crash is reported as `CANDIDATE_CRASH`, an endless loop as `CANDIDATE_TIMEOUT` (`--candidate-timeout`), and a Python candidate that raises as a difference, instead of ending the verifier without a verdict. A pointer return type is not supported, because the emulated and the native address spaces differ.
 
+A binary whose segment or section declares file data beyond the end of the file is rejected as truncated, and pointer buffers must fit in a 1 MiB scratch area (about 1 MiB divided by the number of pointer arguments each).
+
 Limits: the function must be a leaf, or call only code inside the image. A call into an import or libc ends the run with `EMULATION_ERROR` and a hint. State that persists between calls (globals) is reset for every case, so stateful functions need a whole-program test.
 
 ## Round trip

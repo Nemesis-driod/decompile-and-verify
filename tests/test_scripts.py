@@ -390,6 +390,20 @@ def make_pe(code, bits):
     return head + code.ljust(0x200, b"\0")
 
 
+
+def make_elf(code, offset=0x100, filesz=0x1000, memsz=0x1000, file_len=0x200):
+    """A minimal ELF64 with one PT_LOAD whose file range is [offset, offset + filesz); file_len lets a test truncate it."""
+    header = bytearray(64)
+    header[0:4] = b"\x7fELF"
+    header[4], header[5] = 2, 1
+    struct.pack_into("<H", header, 16, 2)
+    struct.pack_into("<H", header, 18, 0x3E)
+    struct.pack_into("<Q", header, 0x20, 64)
+    struct.pack_into("<HH", header, 0x36, 56, 1)
+    body = (bytes(header) + struct.pack("<IIQQQQQQ", 1, 5, offset, 0x400000, 0, filesz, memsz, 0x1000)).ljust(offset, b"\0") + code
+    return body.ljust(file_len, b"\0")[:file_len]
+
+
 @unittest.skipUnless(HAVE_UNICORN, "needs: pip install unicorn")
 class VerifyEmulatedPortableTests(TempDirCase):
     def run_oracle(self, binary, *extra):
@@ -631,6 +645,7 @@ class VerifyEmulatedSafetyTests(TempDirCase):
             with self.assertRaises(ValueError, msg=bad):
                 module.split_candidate_spec(bad)
 
+    @unittest.skipIf(os.name == "nt", "Windows folder names cannot contain colons; drive-letter parsing is covered by the spec test above")
     def test_a_path_with_a_colon_in_a_folder_name_works(self):
         folder = self.tmp / "dir:with:colons"
         folder.mkdir()
@@ -951,6 +966,157 @@ class VerifyTraceToleranceTests(TempDirCase):
             self.assertEqual(r.returncode, 2)
         r = py(SCRIPTS / "verify_trace.py", "--original", self.tmp / "a.jsonl", "--rewrite", self.tmp / "b.jsonl", "--key-tolerance", "x=-2")
         self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+
+
+@unittest.skipUnless(HAVE_UNICORN, "needs: pip install unicorn")
+class VerifyEmulatedInputValidationTests(TempDirCase):
+    """Second public review: file-backed bytes must really be in the file, pointer buffers of any size, finite numbers."""
+
+    SEVEN = bytes.fromhex("B807000000C3")                      # mov eax, 7 ; ret
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "seven.py").write_text("def f():\n    return 7\n")
+        (self.tmp / "first.py").write_text("def f(*bufs):\n    return bufs[0][0]\n")
+        self.first_byte = make_pe(bytes.fromhex("8B442404" "0FB600" "C3"), 32)          # movzx eax, byte [ptr]
+
+    def oracle(self, binary, address, candidate, *extra, args="", ret="i32"):
+        return py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / binary, "--address", address, "--args", args, "--ret", ret,
+                  "--candidate-py", f"{self.tmp / candidate}:f", "--random", "2", *extra)
+
+    def test_an_elf_segment_extending_past_the_end_of_the_file_is_rejected(self):
+        (self.tmp / "t.elf").write_bytes(make_elf(self.SEVEN, offset=0x100, filesz=0x1000, memsz=0x1000, file_len=0x200))
+        r = self.oracle("t.elf", "0x400000", "seven.py")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout, r.stdout)
+        self.assertIn("truncated or corrupt", r.stdout)
+        self.assertEqual(r.returncode, 2)
+
+    def test_a_segment_ending_exactly_at_the_end_of_the_file_is_accepted(self):
+        (self.tmp / "ok.elf").write_bytes(make_elf(self.SEVEN, offset=0x100, filesz=0x10, memsz=0x1000, file_len=0x110))
+        r = self.oracle("ok.elf", "0x400000", "seven.py")
+        self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout)
+
+    def test_a_segment_whose_file_size_exceeds_its_memory_size_is_rejected(self):
+        (self.tmp / "bad.elf").write_bytes(make_elf(self.SEVEN, offset=0x100, filesz=0x20, memsz=0x10, file_len=0x200))
+        self.assertIn("RESULT: SETUP_ERROR", self.oracle("bad.elf", "0x400000", "seven.py").stdout)
+
+    def test_a_pe_section_extending_past_the_end_of_the_file_is_rejected(self):
+        (self.tmp / "t.exe").write_bytes(make_pe(self.SEVEN, 32)[:0x300])                 # the section declares 0x200 bytes at 0x200
+        r = self.oracle("t.exe", "0x401000", "seven.py")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout, r.stdout)
+        self.assertIn("truncated or corrupt", r.stdout)
+
+    def test_a_complete_pe_is_still_accepted(self):
+        (self.tmp / "t.exe").write_bytes(make_pe(self.SEVEN, 32))
+        self.assertIn("RESULT: EQUIVALENT_ON", self.oracle("t.exe", "0x401000", "seven.py").stdout)
+
+    def test_pointer_buffers_larger_than_256_bytes_work(self):
+        (self.tmp / "p.exe").write_bytes(self.first_byte)
+        for size in ("255", "256", "257", "4000"):
+            r = self.oracle("p.exe", "0x401000", "first.py", "--ptr-len", size, args="ptr", ret="u32")
+            self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, (size, r.stdout, r.stderr))
+            self.assertNotIn("Traceback", r.stderr, size)
+
+    def test_cases_file_values_are_checked_against_their_declared_types(self):
+        (self.tmp / "t.exe").write_bytes(make_pe(bytes.fromhex("8B442404" "03442408" "C3"), 32))
+        (self.tmp / "add.py").write_text("def f(a, b):\n    return a + b\n")
+        cases = {'["abc", 1]': "expected a number", "[3.5, 1]": "expected a whole number", "[true, 1]": "expected a number",
+                 "[null, 1]": "expected a number", "[99999999999999999999999, 1]": "does not fit i32", "not json": "not valid JSON",
+                 '["12"]': "must be an array of 2 values"}
+        for line, expected in cases.items():
+            (self.tmp / "c.jsonl").write_text(line + "\n")
+            r = self.oracle("t.exe", "0x401000", "add.py", "--no-boundary", "--random", "0", "--cases", self.tmp / "c.jsonl", args="i32,i32")
+            self.assertIn("RESULT: SETUP_ERROR", r.stdout, (line, r.stdout, r.stderr))
+            self.assertIn(expected, r.stdout, line)
+            self.assertIn("c.jsonl line 1", r.stdout, line) if line != "not json" else None
+            self.assertNotIn("Traceback", r.stderr, line)
+        (self.tmp / "c.jsonl").write_text("[4294967295, 1]\n[-2147483648, 2147483647]\n")                  # both signed and unsigned forms are fine
+        ok = self.oracle("t.exe", "0x401000", "add.py", "--no-boundary", "--random", "0", "--cases", self.tmp / "c.jsonl", args="i32,i32")
+        self.assertIn("RESULT: EQUIVALENT_ON 2 cases", ok.stdout, ok.stdout)
+
+    def test_pointer_values_in_a_cases_file_must_be_hex_strings(self):
+        (self.tmp / "p.exe").write_bytes(self.first_byte)
+        for line, expected in (('["xyz"]', "not a valid hex string"), ("[5]", "expected a hex string")):
+            (self.tmp / "c.jsonl").write_text(line + "\n")
+            r = self.oracle("p.exe", "0x401000", "first.py", "--no-boundary", "--random", "0", "--cases", self.tmp / "c.jsonl", args="ptr", ret="u32")
+            self.assertIn(expected, r.stdout, line)
+
+    def test_buffers_that_cannot_fit_are_a_setup_error(self):
+        (self.tmp / "p.exe").write_bytes(self.first_byte)
+        r = self.oracle("p.exe", "0x401000", "first.py", "--ptr-len", "600000", args="ptr,ptr", ret="u32")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+        self.assertIn("too large for 2 pointer argument(s)", r.stdout)
+
+    def test_non_finite_and_absurd_numeric_options_are_rejected_cleanly(self):
+        (self.tmp / "t.exe").write_bytes(make_pe(self.SEVEN, 32))
+        for flag, value in (("--candidate-timeout", "nan"), ("--candidate-timeout", "inf"), ("--candidate-timeout", "1e999"),
+                            ("--candidate-timeout", "1e30"), ("--max-insns", "0"), ("--max-insns", "99999999999999999999"),
+                            ("--ptr-len", "-1"), ("--show", "-1")):
+            r = self.oracle("t.exe", "0x401000", "seven.py", flag, value)
+            self.assertIn("RESULT: SETUP_ERROR", r.stdout, (flag, value, r.stdout, r.stderr))
+            self.assertNotIn("Traceback", r.stderr, (flag, value))
+            self.assertEqual(r.returncode, 2)
+
+
+class UnreadableFileTests(TempDirCase):
+    @unittest.skipIf(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), "needs a non-root POSIX user")
+    def test_triage_reports_a_file_it_cannot_read(self):
+        path = self.tmp / "locked.bin"
+        path.write_bytes(b"x")
+        path.chmod(0)
+        try:
+            r = py(SCRIPTS / "triage.py", path)
+        finally:
+            path.chmod(0o600)
+        self.assertIn("ERROR: cannot read", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+
+class NumericOptionValidationTests(TempDirCase):
+    """nan, infinity and absurd values must be rejected up front by every script, never reach an API call or the ledger."""
+
+    BAD = ("nan", "inf", "1e999", "-1", "0", "1e30")
+
+    def test_triage_scan_limit(self):
+        (self.tmp / "f.bin").write_bytes(b"\0" * 64)
+        for value in self.BAD:
+            r = py(SCRIPTS / "triage.py", self.tmp / "f.bin", "--scan-mib", value)
+            self.assertIn("--scan-mib must be a number greater than 0", r.stderr, value)
+            self.assertNotIn("Traceback", r.stderr, value)
+
+    def test_verify_run_timeout(self):
+        (self.tmp / "ok.py").write_text("print(1)\n")
+        (self.tmp / "in").mkdir()
+        (self.tmp / "in" / "a").write_text("1")
+        for value in self.BAD:
+            r = py(SCRIPTS / "verify_run.py", "--original", command_for(self.tmp / "ok.py"), "--rewrite", command_for(self.tmp / "ok.py"),
+                   "--inputs", self.tmp / "in", "--timeout", value)
+            self.assertIn("RESULT: SETUP_ERROR", r.stdout, value)
+            self.assertNotIn("Traceback", r.stderr, value)
+
+    def test_the_ledger_never_stores_non_finite_seconds(self):
+        for value in ("nan", "inf", "-1"):
+            r = py(SCRIPTS / "ledger.py", "add", self.tmp / "l.csv", "--address", "0x1", "--name", "f", "--status", "matched", "--seconds", value)
+            self.assertEqual(r.returncode, 2, value)
+            self.assertFalse((self.tmp / "l.csv").exists(), value)
+        (self.tmp / "bad.csv").write_text("address,name,status,oracle,attempts,seconds,notes\n0x1,f,matched,m,1,nan,\n")
+        r = py(SCRIPTS / "ledger.py", "summary", self.tmp / "bad.csv")
+        self.assertIn("RESULT: LEDGER_ERROR", r.stdout)
+        self.assertIn("must be a finite number", r.stdout)
+
+    def test_the_scorer_rejects_non_finite_ledger_values(self):
+        (self.tmp / "t.json").write_text(json.dumps({"file": "x", "kind": "native", "sha256": "0" * 64,
+                                                      "findings": {"secret_like": [], "urls": [], "ips": [], "build_paths": []}}))
+        (self.tmp / "bad.csv").write_text("address,name,status,oracle,attempts,seconds,notes\n0x1,f,matched,m,1,inf,\n")
+        r = py(ASSESS / "score_exposure.py", "--triage", self.tmp / "t.json", "--ledger", self.tmp / "bad.csv")
+        self.assertIn("is not a number", r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_ghidra_wrapper_rejects_nonsense_options(self):
+        (self.tmp / "b.bin").write_bytes(b"x")
+        r = py(SCRIPTS / "ghidra_export.py", self.tmp / "b.bin", self.tmp / "out", "--timeout", "0")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+        self.assertEqual(r.returncode, 2)
 
 
 class RepoHygieneTests(unittest.TestCase):

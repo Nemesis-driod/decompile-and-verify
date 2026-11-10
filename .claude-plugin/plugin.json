@@ -1,6 +1,6 @@
 {
   "name": "decompile-and-verify",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Decompile compiled software with an AI agent and prove every recovered function against the original, plus an assessment skill that measures how recoverable a build is.",
   "author": {
     "name": "Nemesis-driod",

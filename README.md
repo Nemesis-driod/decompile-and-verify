@@ -7,7 +7,7 @@
 
 A decompiler's output is a hypothesis. These skills give your coding agent a method, scripts that print a verdict instead of an opinion, and a way to measure how much of a build an agent can recover and at what cost.
 
-> **Status: v0.4.1, beta.** Verified end to end: native ELF and 32-bit PE (Ghidra 12.1.4), Java JARs (jadx, CFR, Vineflower), Electron asar, PyInstaller extraction, WebAssembly (wabt), rizin. The emulated oracle is verified on stripped x86-64 and x86-32 ELF functions and on a function from a real 32-bit Windows executable. **Not run yet:** .NET, an APK, Mach-O, Unity IL2CPP, retro ROMs. [`routes.md`](skills/decompile-and-verify/references/routes.md) has the full table with versions. 98 unit tests, both skills pass the Agent Skills validator, Claude Code's plugin validator passes, and the `npx skills` CLI discovers both skills.
+> **Status: v0.4.2, beta.** Verified end to end: native ELF and 32-bit PE (Ghidra 12.1.4), Java JARs (jadx, CFR, Vineflower), Electron asar, PyInstaller extraction, WebAssembly (wabt), rizin. The emulated oracle is verified on stripped x86-64 and x86-32 ELF functions and on a function from a real 32-bit Windows executable. **Not run yet:** .NET, an APK, Mach-O, Unity IL2CPP, retro ROMs. [`routes.md`](skills/decompile-and-verify/references/routes.md) has the full table with versions. 114 unit tests, both skills pass the Agent Skills validator, Claude Code's plugin validator passes, and the `npx skills` CLI discovers both skills.
 
 ## Why verify
 

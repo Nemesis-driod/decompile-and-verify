@@ -22,6 +22,7 @@ Exit codes: 0 ok, 1 stale rows found by `check`, 2 setup problem or an invalid l
 import argparse
 import csv
 import hashlib
+import math
 import os
 import re
 import signal
@@ -85,8 +86,9 @@ def problems_in(row):
     if not re.fullmatch(r"\d+", (row["attempts"] or "0").strip()):
         found.append(f"attempts {row['attempts']!r} must be a whole number")
     try:
-        if float(row["seconds"] or 0) < 0:
-            found.append("seconds cannot be negative")
+        seconds = float(row["seconds"] or 0)
+        if not math.isfinite(seconds) or seconds < 0:
+            found.append(f"seconds {row['seconds']!r} must be a finite number that is not negative")
     except ValueError:
         found.append(f"seconds {row['seconds']!r} must be a number")
     for col in ("build_sha256", "candidate_sha256", "corpus_sha256"):
@@ -145,8 +147,8 @@ def build_hash(args):
 
 
 def cmd_add(args):
-    if args.attempts < 0 or args.seconds < 0:
-        fail("attempts and seconds cannot be negative")
+    if args.attempts < 0 or not math.isfinite(args.seconds) or args.seconds < 0:
+        fail("attempts must be a whole number and seconds a finite number, neither negative")
     row = {c: "" for c in COLUMNS}
     row.update({"address": norm_address(args.address), "name": args.name, "status": args.status, "oracle": args.oracle,
                 "attempts": str(args.attempts), "seconds": f"{args.seconds:g}" if args.seconds else "", "notes": args.notes,

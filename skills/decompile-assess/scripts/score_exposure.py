@@ -14,6 +14,7 @@ Components, each 0..1 where 1 means "most exposed":
 import argparse
 import csv
 import json
+import math
 import re
 import signal
 import sys
@@ -71,9 +72,12 @@ def secret_exposure(tri):
 
 def number(value, what, line, path):
     try:
-        return float(value or 0)
+        result = float(value or 0)
     except ValueError:
+        result = math.nan
+    if not math.isfinite(result):
         sys.exit(f"ERROR: ledger {path} line {line}: {what} {value!r} is not a number. Fix it, or run ledger.py summary to see all invalid rows.")
+    return result
 
 
 def recovery(ledger_path, current_sha=""):

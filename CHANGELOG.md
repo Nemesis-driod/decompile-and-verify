@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.2
+
+Fixed. A second public review and this project's own Windows CI found more input-handling gaps. Each was reproduced before it was fixed.
+- `verify_emulated.py`: an ELF segment or PE section that declares file data beyond the end of the file was accepted and silently zero-filled, so the verifier could run against a memory image that was never in the binary. It is now rejected as truncated or corrupt (a range ending exactly at the end of the file is still fine).
+- `verify_emulated.py`: `--ptr-len` above 256 raised a `ValueError` (`bytes(range(n))`). Pointer buffers of any size work, and buffers that cannot fit in the 1 MiB scratch area are a clear setup error.
+- `verify_emulated.py`: `--candidate-timeout nan` and `inf` slipped past validation and raised from `Connection.poll()`. All numeric options are now finite and bounded, including `--max-insns` and `--show`.
+- `verify_emulated.py`: values in a `--cases` file were not checked against their declared types, so a string, a float or `null` raised a `TypeError` and `true` or an out-of-range integer was accepted silently. Every value is now validated, with line-numbered messages.
+- `triage.py`: `--scan-mib inf` raised an `OverflowError`; a file that cannot be read gave a traceback.
+- Same weakness found by sweeping the other scripts: `verify_run.py --timeout nan` and `inf` raised; `ledger.py add --seconds nan` wrote `nan` into the ledger, which then poisoned every total; the scorer and the report renderer accepted non-finite ledger values; `ghidra_export.py` accepted a zero timeout.
+- Tests: the colon-in-a-folder-name test cannot run on Windows (such folder names are illegal there), so it is skipped on Windows; drive-letter parsing is covered by its own test, which passes on Windows CI. 16 new tests (114 in total).
+
 ## 0.4.1
 
 Fixed. Most of these came from a public review of the code; each was reproduced before it was fixed, and the Windows path bug was found by this project's own CI.
