@@ -3,7 +3,7 @@
 
 Usage: verify_run.py --original ./original --rewrite ./rewrite --inputs inputs/ [--mode stdin|arg|arg-text]
                      [--timeout 10] [--min-inputs 20] [--strict]
-Each file in --inputs is one test case: fed on stdin (default), its path passed as the last argument (--mode arg),
+Each file in --inputs is one test case (hidden files, whose names start with a dot, are ignored): fed on stdin (default), its path passed as the last argument (--mode arg),
 or its text passed as the last argument (--mode arg-text).
 
 What is compared: the exit status and standard output. NOT compared: standard error, files written, network traffic,
@@ -80,9 +80,13 @@ def main():
         fail("RESULT: SETUP_ERROR\n--timeout must be a number of seconds greater than 0 and at most 86400.")
     if not os.path.isdir(args.inputs):
         fail(f"RESULT: SETUP_ERROR\n--inputs must be a directory of test-case files: {args.inputs}")
-    cases = sorted(os.path.join(args.inputs, n) for n in os.listdir(args.inputs) if os.path.isfile(os.path.join(args.inputs, n)))
+    files = sorted(n for n in os.listdir(args.inputs) if os.path.isfile(os.path.join(args.inputs, n)))
+    hidden = [n for n in files if n.startswith(".")]
+    cases = [os.path.join(args.inputs, n) for n in files if not n.startswith(".")]
+    if hidden:
+        print(f"note: ignored {len(hidden)} hidden file(s) in --inputs (names starting with a dot, such as .gitkeep and .DS_Store)", file=sys.stderr)
     if not cases:
-        fail("RESULT: SETUP_ERROR\nthe inputs directory is empty.")
+        fail("RESULT: SETUP_ERROR\nthe inputs directory has no test-case files (hidden files starting with a dot are ignored).")
 
     differs, inconclusive, same_failure = [], [], 0
     for case in cases:

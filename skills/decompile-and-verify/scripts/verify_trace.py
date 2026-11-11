@@ -11,6 +11,8 @@ traces carry a "t" field the values must agree, otherwise the traces are misalig
 Numbers are compared with --tolerance (relative and absolute, default 0 = exact); everything else must be equal.
 Hash a framebuffer into a string field to compare frames exactly.
 
+A key that neither trace logged on a given tick is skipped on that tick (optional events); a key logged by only one of the
+traces is NOT compared and is reported in a WARNING (--strict makes it a failure; --keys requires specific keys).
 Typical causes of the first divergence: an action applied one tick late, float32 versus float64 constants, a hidden
 state variable (a buff, an RNG seed), or an uninitialised value.
 
@@ -71,6 +73,8 @@ def main():
     ap.add_argument("--tolerance", type=float, default=0.0)
     ap.add_argument("--key-tolerance", action="append", default=[], metavar="KEY=TOL")
     ap.add_argument("--show", type=int, default=3, help="how many diverging ticks to print")
+    ap.add_argument("--strict", action="store_true",
+                    help="fail (TRACE_KEYS_DIFFER) when the traces do not log the same keys, instead of comparing only the shared ones")
     args = ap.parse_args()
 
     def valid_tolerance(value):
@@ -89,7 +93,9 @@ def main():
             fail(f"RESULT: SETUP_ERROR\n--key-tolerance for {key!r} must be a finite number that is not negative.")
 
     a, b = load(args.original), load(args.rewrite)
-    shared = sorted(set().union(*[set(r) for r in a]) & set().union(*[set(r) for r in b]))
+    keys_a, keys_b = set().union(*[set(r) for r in a]), set().union(*[set(r) for r in b])
+    shared = sorted(keys_a & keys_b)
+    skipped_keys = sorted((keys_a ^ keys_b) - set(args.ignore) - {"t"}) if not args.keys else []
     keys = [k for k in (args.keys.split(",") if args.keys else shared) if k not in args.ignore and k != "t"]
     if not keys:
         fail("RESULT: SETUP_ERROR\nThe traces share no keys to compare. Check the field names.")
@@ -103,6 +109,8 @@ def main():
             sys.exit(1)
         bad = []
         for k in keys:
+            if k not in a[i] and k not in b[i]:
+                continue                                    # an optional key that neither trace logged on this tick
             if k not in a[i] or k not in b[i]:
                 bad.append((k, a[i].get(k, "<missing>"), b[i].get(k, "<missing>")))
                 continue
@@ -131,8 +139,18 @@ def main():
         print(f"RESULT: TRACE_DIVERGES: the traces agree for {n} ticks but have different lengths "
               f"(original {len(a)}, rewrite {len(b)}) (treat as a failure)")
         sys.exit(1)
+    if skipped_keys and args.strict:
+        only_a, only_b = sorted(keys_a - keys_b - set(args.ignore) - {"t"}), sorted(keys_b - keys_a - set(args.ignore) - {"t"})
+        print(f"RESULT: TRACE_KEYS_DIFFER: the traces do not log the same keys (only in the original: {', '.join(only_a) or 'none'}; "
+              f"only in the rewrite: {', '.join(only_b) or 'none'}); the shared keys matched on {n} ticks")
+        sys.exit(1)
     tol = f"tolerance {args.tolerance:g}" if args.tolerance else "exact"
     print(f"RESULT: TRACE_MATCH {n} ticks, {len(keys)} keys ({tol}); a recording of one run, not a proof for other inputs")
+    if skipped_keys:
+        only_a, only_b = sorted(keys_a - keys_b - set(args.ignore) - {"t"}), sorted(keys_b - keys_a - set(args.ignore) - {"t"})
+        print(f"WARNING: not compared, because only one trace logs them: only in the original: {', '.join(only_a) or 'none'}; "
+              f"only in the rewrite: {', '.join(only_b) or 'none'}. A rewrite that never logs a value cannot be checked on it "
+              "(use --keys to require specific keys, or --strict to fail).")
     sys.exit(0)
 
 

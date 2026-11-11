@@ -7,7 +7,7 @@
 
 A decompiler's output is a hypothesis. These skills give your coding agent a method, scripts that print a verdict instead of an opinion, and a way to measure how much of a build an agent can recover and at what cost.
 
-> **Status: v0.4.2, beta.** Verified end to end: native ELF and 32-bit PE (Ghidra 12.1.4), Java JARs (jadx, CFR, Vineflower), Electron asar, PyInstaller extraction, WebAssembly (wabt), rizin. The emulated oracle is verified on stripped x86-64 and x86-32 ELF functions and on a function from a real 32-bit Windows executable. **Not run yet:** .NET, an APK, Mach-O, Unity IL2CPP, retro ROMs. [`routes.md`](skills/decompile-and-verify/references/routes.md) has the full table with versions. 114 unit tests, both skills pass the Agent Skills validator, Claude Code's plugin validator passes, and the `npx skills` CLI discovers both skills.
+> **Status: v0.4.3, beta.** Verified end to end: native ELF and 32-bit PE (Ghidra 12.1.4), Java JARs (jadx, CFR, Vineflower), Electron asar, PyInstaller extraction, WebAssembly (wabt), rizin. The emulated oracle is verified on stripped x86-64 and x86-32 ELF functions and on a function from a real 32-bit Windows executable. **Not run yet:** .NET, an APK, Mach-O, Unity IL2CPP, retro ROMs. [`routes.md`](skills/decompile-and-verify/references/routes.md) has the full table with versions. 150 unit tests, both skills pass the Agent Skills validator, Claude Code's plugin validator passes, and the `npx skills` CLI discovers both skills.
 
 ## Why verify
 
@@ -108,7 +108,7 @@ The same oracle checked a candidate written from Ghidra's decompiled C against a
 
 Requirements: Python 3.9+. Native targets also need [Ghidra](https://github.com/NationalSecurityAgency/ghidra/releases) and a full JDK 21+ with `javac` (a JRE alone fails with a misleading error). The matching oracle needs gcc and objdump; the emulated oracle needs `pip install unicorn`. The skills ask before installing anything.
 
-Context cost, from Claude Code's own estimate (`claude plugin details`): about 319 tokens always on (the two descriptions), and about 2.2k and 1.4k tokens when `decompile-and-verify` or `decompile-assess` fires.
+Context cost, from Claude Code's own estimate (`claude plugin details`): about 319 tokens always on (the two descriptions), and about 2.3k and 1.4k tokens when `decompile-and-verify` or `decompile-assess` fires.
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
@@ -147,7 +147,7 @@ Stripping hid the names. It did not hide the licence algorithm, the activation e
 ## How it works
 
 - **Oracle first.** Matching (same instructions under the original compiler), differential (same behaviour on the same inputs, for the whole program or for one function run under emulation), trace replay (a port reproduces the recorded state tick by tick), round trip, or a whole-build hash. Reading alone is marked `unverified`. [`verification.md`](skills/decompile-and-verify/references/verification.md) says what each verdict proves and what it does not.
-- **Scripts print verdicts.** `MATCH`, `NOT_MATCH`, `BUILD_FAILED`, `REJECTED`, `EQUIVALENT_ON`, `DIFFERS`, `INCONCLUSIVE`, `TOO_FEW_INPUTS`, `EMULATION_ERROR`, `CANDIDATE_CRASH`, `CANDIDATE_TIMEOUT`, `TRACE_MATCH`, `TRACE_DIVERGES`, `TRACE_MISALIGNED`, `SETUP_ERROR`. Clear tool output steers an agent better than extra prompt text, and a timeout, a crash or a vacuous run is never reported as success.
+- **Scripts print verdicts.** `MATCH`, `NOT_MATCH`, `BUILD_FAILED`, `REJECTED`, `EQUIVALENT_ON`, `DIFFERS`, `INCONCLUSIVE`, `TOO_FEW_INPUTS`, `EMULATION_ERROR`, `CANDIDATE_CRASH`, `CANDIDATE_TIMEOUT`, `TRACE_MATCH`, `TRACE_DIVERGES`, `TRACE_MISALIGNED`, `TRACE_KEYS_DIFFER`, `SETUP_ERROR`. Clear tool output steers an agent better than extra prompt text, and a timeout, a crash or a vacuous run is never reported as success.
 - **Cheapest first.** A ranker picks the next function, so cost stays predictable.
 - **Ledger.** Every function leaves a row (status, oracle, attempts, seconds) bound by sha256 to the build, the candidate and the inputs it was verified with. `ledger.py check` flags rows that went stale, and the ranker and scorer ignore rows from another build. The same ledger is the cost-to-recover measurement the assessment uses.
 

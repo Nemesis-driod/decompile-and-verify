@@ -6,7 +6,7 @@ compatibility: Needs a shell and Python 3.9+. Native targets need Ghidra and a J
 metadata:
   author: Nemesis-driod
   homepage: https://github.com/Nemesis-driod/decompile-and-verify
-  version: "0.4.2"
+  version: "0.4.3"
 ---
 
 # Decompile and verify
@@ -22,7 +22,7 @@ The scripts live in `scripts/` next to this file (paths like `scripts/...` are r
 | `rank_functions.py work/export/functions.csv --ledger work/ledger.csv` | prints `NEXT:`, the cheapest function not yet done (`--unnamed-only` skips code Ghidra already named) |
 | `verify_match.py --target t.o --candidate c.c --cc "<original compiler and flags> -c"` | matching oracle |
 | `verify_run.py --original A --rewrite B --inputs dir` | differential oracle, whole program |
-| `verify_emulated.py --binary app --address 0x... --args ptr,i32 --ret u32 --candidate-lib c.so --symbol f` | differential oracle for ONE function inside the original binary, run under emulation (x86 and x86-64, ELF and PE) |
+| `verify_emulated.py --binary app --address 0x... --args ptr,len32 --ret u32 --candidate-lib c.so --symbol f` | differential oracle for ONE function inside the original binary, run under emulation (x86 and x86-64, ELF and PE). `len32` or `len64` right after a `ptr` means "the length of that buffer", so buffer-plus-length functions are tested consistently |
 | `verify_trace.py --original a.jsonl --rewrite b.jsonl` | trace-replay oracle: first diverging tick between the original and a port |
 | `ledger.py add\|summary\|check work/ledger.csv ...` | one tidy row per function; attempts and seconds accumulate; a row records the sha256 of the build, the candidate and the inputs it was verified with, and `check` flags rows that went stale |
 
@@ -45,13 +45,13 @@ Copy this into `work/DECOMPLOG.md` and tick items off. The log is your memory: a
 
 Pick the strongest check the target allows, and say which one backs each function.
 
-- **Matching**: compile with the original compiler, version and flags and compare instructions. Possible for older toolchains you can identify (retro consoles, some 1990s-2000s PC games); rarely for modern builds (LTO, PGO, unknown flags). `verify_match.py`.
+- **Matching**: compile with the original compiler, version and flags and compare instructions and, for a whole object, the data sections (constants, strings, tables). Possible for older toolchains you can identify (retro consoles, some 1990s-2000s PC games); rarely for modern builds (LTO, PGO, unknown flags). `verify_match.py`.
 - **Differential, one function**: run the original function's machine code under emulation and compare it with your candidate. The right tool for a function inside a stripped executable. `verify_emulated.py`.
 - **Differential, whole program**: run original and rewrite on the same inputs. `verify_run.py`.
 - **Trace replay, round trip**: for ports and engine logic (record state per tick from both, compare: `verify_trace.py`) and for file formats (decode, encode, decode). See `references/verification.md`.
 - **Reading only**: no oracle. Mark the function `unverified`. Never present it as recovered source.
 
-A match proves the same machine code, not the author's source: different source can compile identically (a `for` and a `while` loop often do). Aim for code a developer would plausibly have written. For ports, recompilation and emulation, see `references/ports-and-recompilation.md`.
+A match proves the same machine code and data, not the author's source: different source can compile identically (a `for` and a `while` loop often do). Aim for code a developer would plausibly have written. For ports, recompilation and emulation, see `references/ports-and-recompilation.md`.
 
 ## The per-function loop
 

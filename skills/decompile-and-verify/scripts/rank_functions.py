@@ -2,8 +2,13 @@
 """Rank functions cheapest-first for decompilation, so the agent never has to pick the next target itself.
 
 Usage: rank_functions.py functions.csv [--top 20] [--ledger ledger.csv] [--out worklist.csv] [--min-instructions 3]
+                         [--unnamed-only] [--include-undecompiled]
 Input is the functions.csv written by ghidra_export.py. Functions already marked matched / equivalent-tested /
-skipped in the ledger are left out. The weights are a starting guess: retune them from your own ledger once you
+skipped in the ledger are left out, and so are thunks, C-runtime helpers and functions under --min-instructions.
+Functions whose decompile_status is timeout, failed or write_failed have no C to start from: they are listed in a NOTE
+(never dropped silently) and ranked only with --include-undecompiled, when you will be working from the disassembly.
+If only such functions remain the verdict is UNDECOMPILED_LEFT (exit 1), not NOTHING_LEFT; the fix is usually
+`ghidra_export.py --decompile-timeout 120` and re-ranking. NOTHING_LEFT (exit 0) means the work is finished. The weights are a starting guess: retune them from your own ledger once you
 have a few hundred results (a small logistic regression on instructions, branches, calls, jumps works well).
 """
 import argparse
@@ -49,6 +54,8 @@ def main():
     ap.add_argument("--ledger")
     ap.add_argument("--out", default="worklist.csv")
     ap.add_argument("--min-instructions", type=int, default=3)
+    ap.add_argument("--include-undecompiled", action="store_true",
+                    help="also rank functions that failed to decompile (you will work from their disassembly)")
     ap.add_argument("--build-sha256", help="sha256 of the binary under test (default: read from summary.txt next to functions.csv)")
     ap.add_argument("--unnamed-only", action="store_true",
                     help="skip functions Ghidra already named (library code it recognised, or symbols); use on builds with recognised libraries")
@@ -80,7 +87,7 @@ def main():
     if unpinned and current:
         print(f"note: {unpinned} ledger row(s) are not pinned to a build and were trusted; re-add them with --build to pin them",
               file=sys.stderr)
-    rows = []
+    rows, undecompiled = [], {}
     try:
         with open(args.functions_csv, newline="", encoding="utf-8") as f:
             for r in csv.DictReader(f):
@@ -88,10 +95,12 @@ def main():
                     continue
                 if args.unnamed_only and r["named"] == "true":
                     continue
-                if r["decompile_status"] not in ("ok", "skipped"):
-                    continue
                 if int(r["instructions"]) < args.min_instructions or norm_addr(r["address"]) in done:
                     continue
+                if r["decompile_status"] not in ("ok", "skipped"):
+                    undecompiled[r["decompile_status"]] = undecompiled.get(r["decompile_status"], 0) + 1
+                    if not args.include_undecompiled:
+                        continue
                 r["score"] = sum(int(r[k]) * w for k, w in WEIGHTS.items())
                 rows.append(r)
     except FileNotFoundError:
@@ -99,7 +108,14 @@ def main():
     except KeyError as e:
         sys.exit(f"ERROR: functions.csv is missing column {e}. Re-run scripts/ghidra_export.py to regenerate it.")
 
+    missing = sum(undecompiled.values())
+    detail = ", ".join(f"{k}={v}" for k, v in sorted(undecompiled.items()))
     if not rows:
+        if missing:
+            print(f"RESULT: UNDECOMPILED_LEFT ({missing} function(s) have no decompiled C ({detail}); everything that does is done or filtered out)")
+            print("HINT: re-export with a longer limit, for example `ghidra_export.py <binary> <outdir> --decompile-timeout 120`, "
+                  "or add --include-undecompiled to rank them and work from the disassembly.")
+            sys.exit(1)
         print("RESULT: NOTHING_LEFT (every candidate function is already in the ledger or filtered out)")
         return
     rows.sort(key=lambda r: (r["score"], norm_addr(r["address"])))
@@ -111,7 +127,11 @@ def main():
 
     first = rows[0]
     print(f"NEXT: {first['address']} {first['name']} (score {first['score']}, c file: {first['c_file'] or 'n/a'})")
-    print(f"{len(rows)} candidates ranked cheapest first -> {args.out}\n")
+    print(f"{len(rows)} candidates ranked cheapest first -> {args.out}")
+    if missing and not args.include_undecompiled:
+        print(f"NOTE: {missing} more function(s) have no decompiled C ({detail}) and are not ranked. Re-export with "
+              "--decompile-timeout N, or add --include-undecompiled.")
+    print()
     print(f"{'rank':>4}  {'address':<10} {'name':<28} {'score':>5} {'instr':>5} {'br':>3} {'call':>4}")
     for i, r in enumerate(rows[:args.top], 1):
         print(f"{i:>4}  {r['address']:<10} {r['name'][:28]:<28} {r['score']:>5} {r['instructions']:>5} {r['branches']:>3} {r['calls']:>4}")

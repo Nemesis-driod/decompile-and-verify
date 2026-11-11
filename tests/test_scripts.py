@@ -1119,6 +1119,301 @@ class NumericOptionValidationTests(TempDirCase):
         self.assertEqual(r.returncode, 2)
 
 
+@unittest.skipUnless(HAVE_GCC and IS_LINUX, "needs gcc and GNU objdump on Linux")
+class VerifyMatchDataAndAsmTests(TempDirCase):
+    """Third review: constants and strings live outside the instruction stream; the asm guard must know every spelling."""
+
+    def build_target(self, source):
+        (self.tmp / "t.c").write_text(source)
+        subprocess.run(["gcc", "-O2", "-c", str(self.tmp / "t.c"), "-o", str(self.tmp / "t.o")], check=True)
+
+    def match(self, source, *extra):
+        (self.tmp / "c.c").write_text(source)
+        return py(SCRIPTS / "verify_match.py", "--target", self.tmp / "t.o", "--candidate", self.tmp / "c.c", *extra)
+
+    def test_a_different_float_constant_is_not_a_match(self):
+        self.build_target("float f(float x) { return x * 0.2f; }\n")
+        r = self.match("float f(float x) { return x * 0.3f; }\n")
+        self.assertIn("RESULT: NOT_MATCH", r.stdout, r.stdout)
+        self.assertIn("the instructions match but the data differs", r.stdout)
+        self.assertIn("DATA .rodata", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_a_different_string_literal_is_not_a_match(self):
+        self.build_target('#include <stdio.h>\nint f(void) { return puts("hello"); }\n')
+        r = self.match('#include <stdio.h>\nint f(void) { return puts("WORLD"); }\n')
+        self.assertIn("RESULT: NOT_MATCH", r.stdout, r.stdout)
+        self.assertIn("DATA .rodata", r.stdout)
+
+    def test_identical_constants_still_match_and_the_line_says_what_was_compared(self):
+        self.build_target("float f(float x) { return x * 0.2f; }\n")
+        r = self.match("float f(float x) { return x * 0.2f; }\n")
+        self.assertIn("RESULT: MATCH (100%", r.stdout, r.stdout)
+        self.assertIn("data sections identical", r.stdout)
+
+    def test_func_mode_says_data_was_not_compared_and_data_on_compares_it(self):
+        self.build_target("float f(float x) { return x * 0.2f; }\n")
+        r = self.match("float f(float x) { return x * 0.3f; }\n", "--func", "f")
+        self.assertIn("instructions only: data sections not compared with --func", r.stdout)
+        r = self.match("float f(float x) { return x * 0.3f; }\n", "--func", "f", "--data", "on")
+        self.assertIn("RESULT: NOT_MATCH", r.stdout)
+
+    def test_every_inline_asm_spelling_is_rejected(self):
+        self.build_target("int f(int x){ return x + 1; }\n")
+        body = '("lea 1(%q1), %0":"=r"(r):"r"(x))'
+        for spelling in (f"asm{body}", f"asm volatile{body}", f"__asm__ volatile{body}", f"__asm__ __volatile__{body}",
+                         f"asm __volatile__{body}", f"asm inline{body}", f"asm volatile goto{body}", f'__asm mov eax, 1'):
+            r = self.match(f"int f(int x){{ int r; {spelling}; return r; }}\n")
+            self.assertIn("RESULT: REJECTED", r.stdout, (spelling, r.stdout))
+            self.assertEqual(r.returncode, 2, spelling)
+
+    def test_asm_hidden_behind_a_macro_is_rejected(self):
+        self.build_target("int f(int x){ return x + 1; }\n")
+        r = self.match('#define A __asm__\nint f(int x){ int r; A("lea 1(%q1), %0":"=r"(r):"r"(x)); return r; }\n')
+        self.assertIn("RESULT: REJECTED", r.stdout, r.stdout)
+
+    def test_words_that_only_look_like_asm_are_not_rejected(self):
+        self.build_target("int asm_helper(int a){return a;}\nint f(int x){ return x + 1; }\n")
+        r = self.match('/* we avoid asm (for now) */\nint asm_helper(int a){return a;}\n'
+                       'int f(int x){ const char *s = "asm (volatile)"; (void)s; return x + 1; }\n')
+        self.assertNotIn("REJECTED", r.stdout, r.stdout)
+
+    def test_system_headers_that_use_asm_internally_are_not_rejected(self):
+        self.build_target('#include <stdio.h>\nint f(void) { return puts("hello"); }\n')
+        r = self.match('#include <stdio.h>\nint f(void) { return puts("hello"); }\n')
+        self.assertIn("RESULT: MATCH", r.stdout, r.stdout)
+
+
+class TriageSecretsAndHostileInputTests(TempDirCase):
+    """Third review: webhook secrets live in the URL path, JSON quotes the credential name, headers can lie about sizes."""
+
+    def run_triage(self, data, *extra):
+        (self.tmp / "f.bin").write_bytes(data)
+        r = py(SCRIPTS / "triage.py", self.tmp / "f.bin", "--json", self.tmp / "o.json", *extra)
+        return r, (json.loads((self.tmp / "o.json").read_text()) if (self.tmp / "o.json").exists() else None)
+
+    def test_webhook_urls_are_redacted_everywhere(self):
+        secrets = ["T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX", "123456789012345678/abcDEFghiJKLmnoPQRstuVWXyz0123456789",
+                   "123456789:AAEhBP0av28QKSPLEtgHJ4xyzABCDEFGHIJ", "ABCdef123456abcdef123456abcdef12"]
+        data = (b"\0" * 32 + b"https://hooks.slack.com/services/" + secrets[0].encode() + b"\0"
+                + b"https://discord.com/api/webhooks/" + secrets[1].encode() + b"\0"
+                + b"https://api.telegram.org/bot" + secrets[2].encode() + b"/sendMessage\0"
+                + b"https://contoso.webhook.office.com/webhookb2/" + secrets[3].encode() + b"\0"
+                + b"https://example.com/docs/page\0")
+        r, result = self.run_triage(data)
+        everything = r.stdout + json.dumps(result)
+        for secret in secrets:
+            self.assertNotIn(secret.split("/")[-1], everything, secret)
+        self.assertIn("https://api.telegram.org/bot***/sendMessage", result["findings"]["urls"])
+        self.assertIn("https://example.com/docs/page", result["findings"]["urls"])             # ordinary URLs are untouched
+
+    def test_json_style_credentials_are_flagged_and_never_printed(self):
+        data = b'\0{"password":"hunter2hunter2"}\0{"api_key": "sk-live-abcdefghijklmnop"}\0password=hunter2hunter3\0'
+        r, result = self.run_triage(data)
+        kinds = [f["type"] for f in result["findings"]["secret_like"]]
+        self.assertEqual(kinds.count("credential-assignment"), 3, result["findings"]["secret_like"])
+        for value in ("hunter2hunter2", "hunter2hunter3", "sk-live-abcdefghijklmnop"):
+            self.assertNotIn(value, r.stdout + json.dumps(result))
+
+    def test_ordinary_text_with_the_word_password_is_not_flagged(self):
+        r, result = self.run_triage(b"\0Enter your password to continue\0the token list is empty\0")
+        self.assertEqual(result["findings"]["secret_like"], [])
+
+    def test_a_hostile_elf_header_cannot_exhaust_memory(self):
+        header = bytearray(64)
+        header[0:4] = b"\x7fELF"
+        header[4], header[5] = 2, 1
+        struct.pack_into("<H", header, 16, 2)
+        struct.pack_into("<H", header, 18, 0x3E)
+        struct.pack_into("<Q", header, 0x28, 64)
+        struct.pack_into("<HHH", header, 0x3A, 64, 2, 1)
+        shstr = bytearray(64)
+        struct.pack_into("<II", shstr, 0, 1, 3)
+        struct.pack_into("<QQQ", shstr, 0x10, 0, 0, 70 * 10 ** 12)                  # a 70 TB section-name table in a 192-byte file
+        r, result = self.run_triage(bytes(header) + bytes(64) + bytes(shstr))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertTrue(result["malformed"])
+
+    def test_text_with_crlf_at_bytes_2_and_3_is_not_python_bytecode(self):
+        r, result = self.run_triage(b"OK\r\nthis is just a text file\r\nwith several lines in it\r\n")
+        self.assertNotIn("bytecode", r.stdout)
+
+    def test_a_real_pyc_is_still_recognised(self):
+        import py_compile
+        (self.tmp / "m.py").write_text("def f(x):\n    return x + 1\n")
+        py_compile.compile(str(self.tmp / "m.py"), cfile=str(self.tmp / "m.pyc"), doraise=True)
+        r = py(SCRIPTS / "triage.py", self.tmp / "m.pyc")
+        self.assertIn("Python bytecode", r.stdout, r.stdout)
+
+    def test_the_wasm_route_names_tools_that_every_wabt_release_ships(self):
+        r, result = self.run_triage(b"\0asm\x01\0\0\0")
+        self.assertIn("wasm2wat", r.stdout)
+        self.assertIn("only if your wabt build has it", r.stdout)
+
+
+class RankUndecompiledTests(TempDirCase):
+    HEADER = "address,name,named,size_bytes,instructions,branches,calls,jumps,is_thunk,decompile_status,c_lines,gotos,autovars,c_file\n"
+
+    def rank(self, rows, *extra):
+        (self.tmp / "f.csv").write_text(self.HEADER + rows)
+        return py(SCRIPTS / "rank_functions.py", self.tmp / "f.csv", "--out", self.tmp / "w.csv", *extra)
+
+    FAILED = ('00100100,"FUN_00100100",false,300,90,9,2,0,false,timeout,0,0,0,\n'
+              '00100200,"FUN_00100200",false,300,80,8,2,0,false,failed,0,0,0,\n')
+    OK = '00100300,"FUN_00100300",false,30,10,1,0,0,false,ok,10,0,2,x.c\n'
+
+    def test_only_undecompiled_functions_left_is_not_reported_as_finished(self):
+        r = self.rank(self.FAILED)
+        self.assertIn("RESULT: UNDECOMPILED_LEFT", r.stdout)
+        self.assertIn("failed=1, timeout=1", r.stdout)
+        self.assertIn("--decompile-timeout", r.stdout)
+        self.assertNotIn("NOTHING_LEFT", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_include_undecompiled_ranks_them_for_work_from_the_disassembly(self):
+        r = self.rank(self.FAILED, "--include-undecompiled")
+        self.assertTrue(r.stdout.startswith("NEXT: 00100200"), r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+    def test_missing_functions_are_mentioned_next_to_the_ranked_ones(self):
+        r = self.rank(self.FAILED + self.OK)
+        self.assertTrue(r.stdout.startswith("NEXT: 00100300"), r.stdout)
+        self.assertIn("NOTE: 2 more function(s) have no decompiled C", r.stdout)
+
+    def test_a_finished_list_is_still_nothing_left(self):
+        r = self.rank("")
+        self.assertIn("RESULT: NOTHING_LEFT", r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+
+@unittest.skipUnless(HAVE_UNICORN, "needs: pip install unicorn")
+class VerifyEmulatedBufferLengthTests(TempDirCase):
+    """Third review: a buffer plus its length must be generated together, or a correct candidate looks broken."""
+
+    # x86-32 cdecl: unsigned sum_bytes(const unsigned char *p, int n) { unsigned s = 0; for (; n > 0; n--) s += *p++; return s; }
+    SUM_BYTES = bytes.fromhex("8B542404" "8B4C2408" "31C0" "85C9" "7E09" "0FB61A" "01D8" "42" "49" "75F7" "C3")
+
+    def setUp(self):
+        super().setUp()
+        (self.tmp / "s.exe").write_bytes(make_pe(self.SUM_BYTES, 32))
+        (self.tmp / "good.py").write_text("def f(buf, n):\n    return sum(buf[:n])\n")
+        (self.tmp / "bad.py").write_text("def f(buf, n):\n    return sum(buf[:max(n - 1, 0)])\n")
+
+    def oracle(self, candidate, *extra, args="ptr,len32"):
+        return py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / "s.exe", "--address", "0x401000", "--args", args, "--ret", "u32",
+                  "--candidate-py", f"{self.tmp / candidate}:f", *extra)
+
+    def test_a_correct_buffer_plus_length_candidate_passes_with_len32(self):
+        r = self.oracle("good.py")
+        self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout + r.stderr)
+
+    def test_a_wrong_candidate_is_still_caught(self):
+        r = self.oracle("bad.py")
+        self.assertIn("RESULT: DIFFERS", r.stdout, r.stdout)
+
+    def test_without_len32_the_failure_names_the_real_cause(self):
+        r = self.oracle("good.py", args="ptr,i32")
+        self.assertIn("RESULT: EMULATION_ERROR", r.stdout, r.stdout)
+        self.assertIn("len32", r.stdout)
+        self.assertNotIn("Check --abi", r.stdout)
+
+    def test_zero_length_and_full_length_buffers_are_among_the_cases_and_always_consistent(self):
+        log = self.tmp / "seen.txt"
+        (self.tmp / "log.py").write_text(f"def f(buf, n):\n    open({str(log)!r}, 'a').write(f'{{len(buf)}} {{n}}\\n')\n    return sum(buf[:n])\n")
+        r = self.oracle("log.py", "--random", "0", "--ptr-len", "8")
+        self.assertIn("RESULT: EQUIVALENT_ON", r.stdout, r.stdout)
+        seen = {tuple(map(int, line.split())) for line in log.read_text().splitlines()}
+        self.assertIn((0, 0), seen)                                   # an empty buffer
+        self.assertIn((8, 8), seen)                                   # a full buffer
+        self.assertTrue(all(length == n for length, n in seen), seen)  # the length argument always equals the buffer size
+
+    def test_len_types_must_follow_a_pointer(self):
+        for args in ("len32", "i32,len32", "ptr,len32,len32", "len64,ptr"):
+            r = self.oracle("good.py", args=args)
+            self.assertIn("must come right after the ptr argument", r.stdout, args)
+            self.assertEqual(r.returncode, 2)
+
+    def test_a_len_type_is_not_a_return_type(self):
+        r = py(SCRIPTS / "verify_emulated.py", "--binary", self.tmp / "s.exe", "--address", "0x401000", "--args", "ptr,len32", "--ret", "len32",
+               "--candidate-py", f"{self.tmp / 'good.py'}:f")
+        self.assertIn("unknown return type", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+
+    def test_cases_files_give_the_length_as_a_plain_integer(self):
+        (self.tmp / "c.jsonl").write_text('["0102030405", 5]\n["0102030405", 2]\n["", 0]\n')
+        r = self.oracle("good.py", "--no-boundary", "--random", "0", "--cases", self.tmp / "c.jsonl")
+        self.assertIn("RESULT: EQUIVALENT_ON 3 cases", r.stdout, r.stdout)
+
+
+class TraceKeyHandlingTests(TempDirCase):
+    def compare(self, a, b, *extra):
+        for name, rows in (("a.jsonl", a), ("b.jsonl", b)):
+            (self.tmp / name).write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return py(SCRIPTS / "verify_trace.py", "--original", self.tmp / "a.jsonl", "--rewrite", self.tmp / "b.jsonl", *extra)
+
+    OPTIONAL = [{"t": 0, "x": 1}, {"t": 1, "x": 2, "event": "hit"}, {"t": 2, "x": 3}]
+
+    def test_an_optional_key_missing_from_both_traces_on_a_tick_is_not_a_difference(self):
+        r = self.compare(self.OPTIONAL, self.OPTIONAL)
+        self.assertIn("RESULT: TRACE_MATCH 3 ticks, 2 keys", r.stdout, r.stdout)
+        self.assertEqual(r.returncode, 0)
+
+    def test_a_real_difference_in_an_optional_key_is_still_caught(self):
+        other = [dict(row) for row in self.OPTIONAL]
+        other[1]["event"] = "miss"
+        r = self.compare(self.OPTIONAL, other)
+        self.assertIn("RESULT: TRACE_DIVERGES at tick 1 (event:", r.stdout)
+
+    def test_a_key_logged_on_a_tick_by_one_side_only_is_a_difference(self):
+        other = [dict(row) for row in self.OPTIONAL]
+        del other[1]["event"]
+        r = self.compare(self.OPTIONAL, other, "--keys", "x,event")
+        self.assertIn("RESULT: TRACE_DIVERGES", r.stdout)
+
+    def test_a_key_that_only_one_trace_ever_logs_is_reported_not_silently_skipped(self):
+        a = [{"t": 0, "x": 1, "hp": 50}, {"t": 1, "x": 2, "hp": 49}]
+        b = [{"t": 0, "x": 1}, {"t": 1, "x": 2}]
+        r = self.compare(a, b)
+        self.assertIn("RESULT: TRACE_MATCH", r.stdout)
+        self.assertIn("WARNING: not compared", r.stdout)
+        self.assertIn("only in the original: hp", r.stdout)
+
+    def test_strict_fails_when_the_traces_log_different_keys(self):
+        a = [{"t": 0, "x": 1, "hp": 50}]
+        b = [{"t": 0, "x": 1}]
+        r = self.compare(a, b, "--strict")
+        self.assertIn("RESULT: TRACE_KEYS_DIFFER", r.stdout)
+        self.assertEqual(r.returncode, 1)
+
+    def test_naming_the_key_with_keys_makes_it_a_requirement(self):
+        a = [{"t": 0, "x": 1, "hp": 50}]
+        b = [{"t": 0, "x": 1}]
+        self.assertIn("TRACE_DIVERGES", self.compare(a, b, "--keys", "x,hp").stdout)
+
+
+class VerifyRunHiddenFilesTests(TempDirCase):
+    def test_hidden_files_are_not_test_cases(self):
+        (self.tmp / "ok.py").write_text("print(1)\n")
+        (self.tmp / "in").mkdir()
+        (self.tmp / "in" / "real").write_text("1")
+        (self.tmp / "in" / ".gitkeep").write_text("")
+        (self.tmp / "in" / ".DS_Store").write_text("")
+        r = py(SCRIPTS / "verify_run.py", "--original", command_for(self.tmp / "ok.py"), "--rewrite", command_for(self.tmp / "ok.py"),
+               "--inputs", self.tmp / "in", "--min-inputs", "3", "--strict")
+        self.assertIn("RESULT: TOO_FEW_INPUTS 1", r.stdout, r.stdout)
+        self.assertIn("ignored 2 hidden file(s)", r.stderr)
+
+    def test_a_folder_with_only_hidden_files_is_a_setup_error(self):
+        (self.tmp / "ok.py").write_text("print(1)\n")
+        (self.tmp / "in").mkdir()
+        (self.tmp / "in" / ".gitkeep").write_text("")
+        r = py(SCRIPTS / "verify_run.py", "--original", command_for(self.tmp / "ok.py"), "--rewrite", command_for(self.tmp / "ok.py"),
+               "--inputs", self.tmp / "in")
+        self.assertIn("RESULT: SETUP_ERROR", r.stdout)
+        self.assertEqual(r.returncode, 2)
+
+
 class RepoHygieneTests(unittest.TestCase):
     TEXT = {".py", ".md", ".json", ".yml", ".yaml", ".c", ".java", ".csv", ".txt", ".toml", ""}
     KEY_SHAPES = [re.compile(p) for p in (r"AKIA[0-9A-Z]{16}", r"ghp_[0-9A-Za-z]{36}", r"sk_live_[0-9a-zA-Z]{20}", r"xox[baprs]-[0-9A-Za-z-]{10,}",
@@ -1169,6 +1464,30 @@ class GhidraExportTests(TempDirCase):
         self.assertTrue(any(row["name"] == "twice" and row["decompile_status"] == "ok" for row in rows))
         recorded = dict(line.split("=", 1) for line in (self.tmp / "out" / "summary.txt").read_text().splitlines() if "=" in line)
         self.assertEqual(recorded["sha256"], hashlib.sha256((self.tmp / "p").read_bytes()).hexdigest())
+
+    def test_a_very_long_function_name_does_not_abort_the_export(self):
+        name = "very_long_function_name_" + "x" * 300
+        (self.tmp / "p.c").write_text(f"#include <stdio.h>\nint {name}(int a){{return a*3+1;}}\nint helper(int a){{return a-1;}}\n"
+                                      f"int main(int c,char**v){{printf(\"%d\\n\",{name}(c)+helper(c));return 0;}}\n")
+        subprocess.run(["gcc", "-O0", "-o", str(self.tmp / "p"), str(self.tmp / "p.c")], check=True)
+        r = py(SCRIPTS / "ghidra_export.py", self.tmp / "p", self.tmp / "out")
+        self.assertIn("RESULT: OK", r.stdout, r.stdout)
+        files = [p.name for p in (self.tmp / "out" / "decompiled").iterdir()]
+        self.assertTrue(any("very_long_function_name_" in f for f in files))
+        self.assertLessEqual(max(len(f) for f in files), 255)
+        with open(self.tmp / "out" / "functions.csv", newline="", encoding="utf-8") as f:
+            rows = {row["name"]: row for row in csv.DictReader(f)}
+        self.assertEqual(rows[name]["decompile_status"], "ok")
+        self.assertIn("helper", rows)                               # the functions after the long one were exported too
+
+    def test_the_decompile_limit_reaches_ghidra(self):
+        (self.tmp / "p.c").write_text("int twice(int x){return x*2+1;}\nint main(int c,char**v){return twice(c);}\n")
+        subprocess.run(["gcc", "-O1", "-o", str(self.tmp / "p"), str(self.tmp / "p.c")], check=True)
+        for given, expected in ((None, "30"), ("7", "7")):
+            extra = ["--decompile-timeout", given] if given else []
+            r = py(SCRIPTS / "ghidra_export.py", self.tmp / "p", self.tmp / "out", *extra)
+            self.assertIn("RESULT: OK", r.stdout, r.stdout)
+            self.assertIn(f"decompile_timeout_seconds={expected}", (self.tmp / "out" / "summary.txt").read_text())
 
     def test_missing_binary_is_a_setup_error(self):
         r = py(SCRIPTS / "ghidra_export.py", self.tmp / "nope", self.tmp / "out")

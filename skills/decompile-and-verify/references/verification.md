@@ -15,7 +15,7 @@
 
 | Verdict | Proves | Does not prove |
 |---|---|---|
-| `MATCH` (matching) | your source compiles to the same instructions with that toolchain | that it is the author's source, or behaviour under another toolchain |
+| `MATCH` (matching) | your source compiles to the same instructions with that toolchain and, for a whole object, to the same data sections (constants, strings, tables) | that it is the author's source, or behaviour under another toolchain. With `--func`, data is not compared unless `--data on` |
 | `EQUIVALENT_ON n` (`verify_run.py`) | same exit status and stdout on those n whole-program inputs | stderr, files written, network or other side effects, or any other input |
 | `INCONCLUSIVE` (`verify_run.py`) | nothing: both programs timed out, or both failed identically on every input | equivalence in either direction |
 | `EQUIVALENT_ON n cases` (`verify_emulated.py`) | the original function's machine code and your candidate agree on those n argument sets (return value and pointer buffers) | behaviour on other arguments, or side effects on memory you did not pass in |
@@ -30,7 +30,7 @@ Record the sha256 of the exact binary in the log and in every report, and say wh
 
 ## Matching
 
-Use the original compiler, version and flags (`--cc`). `verify_match.py` compares `objdump` output after normalising offsets; function names must match the target's, and relocation lines keep their symbol names, so call and data destinations are compared too. For retro targets prefer asm-differ or objdiff, which understand relocations and register differences. In linked executables, relocations and layout break byte comparison, so use differential testing there.
+Use the original compiler, version and flags (`--cc`). `verify_match.py` compares `objdump` output after normalising offsets, and then the data sections (`.rodata*`, `.data*`, `.rdata`, `.bss*`: sizes, contents and relocations), because a different literal (`0.3f` instead of `0.2f`, `"WORLD"` instead of `"hello"`) changes no instruction. With `--func` the object may hold other functions' data, so data is skipped (the MATCH line says so) unless you give `--data on`, which compares every data section; function names must match the target's, and relocation lines keep their symbol names, so call and data destinations are compared too. For retro targets prefer asm-differ or objdiff, which understand relocations and register differences. In linked executables, relocations and layout break byte comparison, so use differential testing there.
 
 Read the diff, not just the percentage, and change one thing per attempt. Typical near-misses: signedness, loop form, evaluation order, integer width, a local that should be a parameter, struct field order.
 
@@ -41,6 +41,8 @@ python3 scripts/verify_run.py --original ./orig --rewrite ./new --inputs inputs/
 ```
 
 A timeout is not behaviour. If both programs time out on an input, that input is `INCONCLUSIVE`; if only one does, that is a difference. `--min-inputs` warns when there are few inputs, and `--strict` turns the warning into a failure (`TOO_FEW_INPUTS`) and rejects runs where both programs failed identically on every input.
+
+Hidden files in the inputs folder (`.gitkeep`, `.DS_Store`) are not test cases.
 
 Choose inputs on purpose: boundaries first (0, negative, maximum, empty, off-by-one around every comparison in the code), then random, then inputs from real usage. Do not derive every input from the decompiled code you are testing. Differential fuzzing (AFL++ or libFuzzer generating inputs, both implementations compared on each) finds what hand-picked inputs miss.
 
@@ -57,6 +59,8 @@ python3 scripts/verify_emulated.py --binary app --address 0x1250 --args ptr --re
 python3 scripts/verify_emulated.py --binary app.exe --address 0x00406af0 --args ptr --ret i32 --ptr-len 128 \
     --candidate-py recovered.py:validate_image_base --cases header_cases.jsonl
 ```
+
+For a buffer plus its length (`sum_bytes(p, n)`), write `--args ptr,len32` (or `len64`): the buffer and its length are generated together, with empty, partial and full buffers. With plain `ptr,i32` a boundary length such as 2147483646 meets a 16-byte buffer, and a correct function then runs out of instructions or crashes; the error says so and points to `len32`.
 
 Boundary values for every argument, pairwise combinations of the first three arguments' boundary values, and seeded random cases are generated for you. They do not find a bug that needs one specific constant (`x == 7 && y == 13`); `--cases` adds your own (JSON lines, `ptr` values as hex strings), which you need for functions that only do something interesting on structured input. Pointer arguments get a buffer of `--ptr-len` bytes and the buffer is compared after the call, so output buffers are checked.
 
@@ -80,7 +84,7 @@ For engine logic you port (simulators, trainers, recompiled games): record per-t
 python3 scripts/verify_trace.py --original original.jsonl --rewrite port.jsonl --tolerance 1e-5 --ignore frame_time
 ```
 
-It reports the first diverging tick and key. Typical causes: an action applied one tick late, float32 constants (exact comparison fails, a small tolerance passes), hidden state (a buff that multiplies speed), a dropped or duplicated tick (reported as `TRACE_MISALIGNED`). Replays find what reading the code misses.
+It reports the first diverging tick and key. A key that neither trace logged on a tick (an optional event) is skipped on that tick; a key that only one trace ever logs is not compared and is named in a `WARNING`, and `--strict` turns that into `TRACE_KEYS_DIFFER`. `--keys` makes specific keys a requirement. Typical causes: an action applied one tick late, float32 constants (exact comparison fails, a small tolerance passes), hidden state (a buff that multiplies speed), a dropped or duplicated tick (reported as `TRACE_MISALIGNED`). Replays find what reading the code misses.
 
 ## Whole-build match
 
@@ -88,8 +92,8 @@ When you can rebuild the whole binary with the original toolchain, compare the r
 
 ## Keeping the oracle honest
 
-- Reject inline assembly and raw data directives (`verify_match.py` does).
+- Reject inline assembly and raw data directives (`verify_match.py` does, in every spelling and behind macros; it is a tripwire on the source, not a security boundary).
 - Hold out inputs. Do not tune the rewrite on the whole test set.
-- Make failures loud. The scripts print `RESULT:` with a fixed vocabulary: `MATCH`, `NOT_MATCH`, `BUILD_FAILED`, `REJECTED`, `EQUIVALENT_ON`, `DIFFERS`, `INCONCLUSIVE`, `TOO_FEW_INPUTS`, `EMULATION_ERROR`, `CANDIDATE_CRASH`, `CANDIDATE_TIMEOUT`, `TRACE_MATCH`, `TRACE_DIVERGES`, `TRACE_MISALIGNED`, `SETUP_ERROR`. Treat anything but a success as a failure.
+- Make failures loud. The scripts print `RESULT:` with a fixed vocabulary: `MATCH`, `NOT_MATCH`, `BUILD_FAILED`, `REJECTED`, `EQUIVALENT_ON`, `DIFFERS`, `INCONCLUSIVE`, `TOO_FEW_INPUTS`, `EMULATION_ERROR`, `CANDIDATE_CRASH`, `CANDIDATE_TIMEOUT`, `TRACE_MATCH`, `TRACE_DIVERGES`, `TRACE_MISALIGNED`, `TRACE_KEYS_DIFFER`, `SETUP_ERROR`. The ranker adds `NOTHING_LEFT` (finished) and `UNDECOMPILED_LEFT` (only functions without decompiled C remain). Treat anything but a success as a failure.
 - Limit output. The first 40 diff lines are enough; ask for more when you need them.
 - Re-run the oracle after every cleanup or rename, and commit only when the verdict improves.

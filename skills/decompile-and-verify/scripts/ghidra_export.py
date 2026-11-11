@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Export a function inventory and decompiled C for every function, using Ghidra headless (Windows, macOS, Linux).
 
-Usage: ghidra_export.py <binary> <outdir> [--max N] [--no-decompile] [--timeout SECONDS]
+Usage: ghidra_export.py <binary> <outdir> [--max N] [--no-decompile] [--timeout SECONDS] [--decompile-timeout SECONDS]
 Output: <outdir>/functions.csv, summary.txt (written last: the completion marker), decompiled/<addr>_<name>.c, ghidra.log
 A previous export in <outdir> is deleted first, so old files can never be mistaken for this run's output.
 
@@ -79,10 +79,12 @@ def main():
     ap.add_argument("--max", type=int, default=0, help="stop after N functions (0 = all)")
     ap.add_argument("--no-decompile", action="store_true", help="inventory only, skip the decompiler")
     ap.add_argument("--timeout", type=int, default=600, help="Ghidra analysis timeout in seconds (default 600)")
+    ap.add_argument("--decompile-timeout", type=int, default=30,
+                    help="seconds Ghidra may spend decompiling ONE function (default 30); functions that exceed it get decompile_status=timeout")
     args = ap.parse_args()
 
-    if args.timeout <= 0 or args.max < 0:
-        fail("RESULT: SETUP_ERROR\n--timeout must be greater than 0 and --max cannot be negative.")
+    if args.timeout <= 0 or args.max < 0 or not 1 <= args.decompile_timeout <= 3600:
+        fail("RESULT: SETUP_ERROR\n--timeout must be greater than 0, --max cannot be negative, and --decompile-timeout must be 1 to 3600 seconds.")
     binary = Path(args.binary)
     if not binary.is_file():
         fail(f"RESULT: SETUP_ERROR\nbinary not found: {binary}")
@@ -106,7 +108,7 @@ def main():
     print(f"ghidra_export: analyzing {binary.name} (large files take a while; log: {log_path})")
     command = [str(headless), str(project), "export", "-import", str(binary.resolve()), "-overwrite",
                "-analysisTimeoutPerFile", str(args.timeout), "-scriptPath", str(scripts),
-               "-postScript", "ExportFunctions.java", str(out), str(args.max), "0" if args.no_decompile else "1"]
+               "-postScript", "ExportFunctions.java", str(out), str(args.max), "0" if args.no_decompile else "1", str(args.decompile_timeout)]
     try:
         with open(log_path, "wb") as log:
             code = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT).returncode
@@ -128,7 +130,9 @@ def main():
         else:
             print(f"RESULT: FAILED (Ghidra exited {code} and produced no functions.csv). Last log lines:")
         print("\n".join(log_text.splitlines()[-25:]))
-        if "unsupported java version" in log_text or "JDK path" in log_text or "JAVA_HOME" in log_text:
+        if "FileSystemException" in log_text or "No space left" in log_text:
+            print("HINT: the file system refused a file: a full disk, missing permissions, or a path that is too long. The log names the file.")
+        elif "unsupported java version" in log_text or "JDK path" in log_text or "JAVA_HOME" in log_text:
             print("HINT: Ghidra needs a full JDK 21+ with javac. Install one and set JAVA_HOME.")
         else:
             print("HINT: unsupported format or architecture, a script compile error, a timeout, or too little memory. "

@@ -12,6 +12,9 @@ separate process, so a crash or an endless loop in it ends the run with CANDIDAT
 of taking the verifier down.
 
 Argument types: i8 u8 i16 u16 i32 u32 i64 u64 f64 ptr   (ptr = a buffer; its final bytes are compared too)
+                len32 len64   (right after a ptr: the byte length of that buffer. Use it for buffer-plus-length functions such
+                as sum_bytes(p, n): --args ptr,len32. The buffer and its length are generated together, so a correct
+                candidate never sees a length that is larger than its buffer.)
 Return types:   void i32 u32 i64 u64 f64 (also i8 u8 i16 u16). A pointer return is not supported: the emulated and the
                 native address spaces differ, so compare the pointed-to data or an offset instead.
 Cases: boundary values for every argument, pairwise combinations of the boundary values of the first three arguments,
@@ -59,7 +62,12 @@ INT_TYPES = {"i8": (8, True), "u8": (8, False), "i16": (16, True), "u16": (16, F
              "i32": (32, True), "u32": (32, False), "i64": (64, True), "u64": (64, False)}
 CTYPES = {"i8": ctypes.c_int8, "u8": ctypes.c_uint8, "i16": ctypes.c_int16, "u16": ctypes.c_uint16,
           "i32": ctypes.c_int32, "u32": ctypes.c_uint32, "i64": ctypes.c_int64, "u64": ctypes.c_uint64,
-          "f64": ctypes.c_double, "ptr": ctypes.c_void_p}
+          "f64": ctypes.c_double, "ptr": ctypes.c_void_p, "len32": ctypes.c_int32, "len64": ctypes.c_uint64}
+LEN_BASE = {"len32": "i32", "len64": "u64"}     # an integer argument holding the byte length of the ptr argument right before it
+
+
+def base_kind(kind):
+    return LEN_BASE.get(kind, kind)
 
 
 class SetupError(Exception):
@@ -219,34 +227,78 @@ def small_values(kind, ptr_len):
     return sorted({0, 1, lo, hi} | ({-1} if signed else set()))
 
 
-def boundary_cases(kinds, ptr_len):
-    base = [base_value(k, ptr_len) for k in kinds]
-    cases = [list(base)]
-    for i, kind in enumerate(kinds):
-        if kind == "ptr":
-            variants = [b"\xff" * ptr_len, ramp(ptr_len), bytes((0x80 + j) & 0xFF for j in range(ptr_len)), b"\x01" * ptr_len]
-        elif kind == "f64":
-            variants = [0.0, -0.0, 1.0, -1.0, 0.5, 2.5, 1e-300, 1e300, math.pi, 100.0, 255.0]
+def make_slots(kinds):
+    """(index, width) pairs: a ptr followed by len32/len64 is ONE slot of width 2 (a buffer and its length), anything else is one argument."""
+    slots, i = [], 0
+    while i < len(kinds):
+        if kinds[i] == "ptr" and i + 1 < len(kinds) and kinds[i + 1] in LEN_BASE:
+            slots.append((i, 2))
+            i += 2
         else:
-            variants = int_bounds(kind)
-        for v in variants:
-            case = list(base)
-            case[i] = v
-            cases.append(case)
-    for pick in (0, -1):                              # all arguments at their lowest / highest boundary at once
-        case = []
-        for kind in kinds:
-            if kind == "ptr":
-                case.append(b"\xff" * ptr_len if pick else bytes(ptr_len))
-            elif kind == "f64":
-                case.append(1e300 if pick else 0.0)
-            else:
-                case.append(int_bounds(kind)[pick])
-        cases.append(case)
-    if len(kinds) >= 2:                               # combinations: bugs that need two arguments at their edges together
-        head = min(len(kinds), 3)
-        for combo in itertools.product(*[small_values(k, ptr_len) for k in kinds[:head]]):
-            cases.append(list(combo) + base[head:])
+            slots.append((i, 1))
+            i += 1
+    return slots
+
+
+def slot_base(kinds, slot, ptr_len):
+    i, width = slot
+    return (bytes(ptr_len), ptr_len) if width == 2 else (base_value(kinds[i], ptr_len),)
+
+
+def slot_variants(kinds, slot, ptr_len):
+    i, width = slot
+    if width == 2:                                    # buffer lengths around the edges, with several byte patterns each
+        lengths = sorted({0, 1, 2, ptr_len // 2, ptr_len - 1, ptr_len} & set(range(ptr_len + 1)))
+        patterns = (lambda n: bytes(n), lambda n: b"\xff" * n, ramp, lambda n: bytes((0x80 + j) & 0xFF for j in range(n)), lambda n: b"\x01" * n)
+        return [(pattern(n), n) for n in lengths for pattern in patterns]
+    kind = kinds[i]
+    if kind == "ptr":
+        variants = [b"\xff" * ptr_len, ramp(ptr_len), bytes((0x80 + j) & 0xFF for j in range(ptr_len)), b"\x01" * ptr_len]
+    elif kind == "f64":
+        variants = [0.0, -0.0, 1.0, -1.0, 0.5, 2.5, 1e-300, 1e300, math.pi, 100.0, 255.0]
+    else:
+        variants = int_bounds(kind)
+    return [(v,) for v in variants]
+
+
+def slot_small(kinds, slot, ptr_len):
+    i, width = slot
+    if width == 2:
+        return [(bytes(ptr_len), ptr_len), (b"\xff" * ptr_len, ptr_len), (b"", 0)]
+    return [(v,) for v in small_values(kinds[i], ptr_len)]
+
+
+def slot_extreme(kinds, slot, ptr_len, high):
+    i, width = slot
+    if width == 2:
+        return (b"\xff" * ptr_len, ptr_len) if high else (b"", 0)
+    kind = kinds[i]
+    if kind == "ptr":
+        return (b"\xff" * ptr_len if high else bytes(ptr_len),)
+    if kind == "f64":
+        return (1e300 if high else 0.0,)
+    return (int_bounds(kind)[-1 if high else 0],)
+
+
+def flatten(values_per_slot):
+    return [x for values in values_per_slot for x in values]
+
+
+def boundary_cases(kinds, ptr_len):
+    slots = make_slots(kinds)
+    base = [slot_base(kinds, s, ptr_len) for s in slots]
+    cases = [flatten(base)]
+    for k, slot in enumerate(slots):                  # one slot at its edges, the others at their base values
+        for variant in slot_variants(kinds, slot, ptr_len):
+            values = list(base)
+            values[k] = variant
+            cases.append(flatten(values))
+    for high in (False, True):                        # every slot at its lowest / highest edge at once
+        cases.append(flatten([slot_extreme(kinds, s, ptr_len, high) for s in slots]))
+    if len(slots) >= 2:                               # combinations: bugs that need two slots at their edges together
+        head = min(len(slots), 3)
+        for combo in itertools.product(*[slot_small(kinds, s, ptr_len) for s in slots[:head]]):
+            cases.append(flatten(list(combo) + base[head:]))
     unique, seen = [], set()
     for case in cases:
         key = repr(case)
@@ -258,17 +310,22 @@ def boundary_cases(kinds, ptr_len):
 
 def random_cases(kinds, ptr_len, count, seed):
     rnd = random.Random(seed)
+    slots = make_slots(kinds)
     cases = []
     for _ in range(count):
         case = []
-        for kind in kinds:
-            if kind == "ptr":
+        for i, width in slots:
+            kind = kinds[i]
+            if width == 2:
+                length = rnd.randint(0, ptr_len)
+                case += [bytes(rnd.getrandbits(8) for _ in range(length)), length]
+            elif kind == "ptr":
                 case.append(bytes(rnd.getrandbits(8) for _ in range(ptr_len)))
             elif kind == "f64":
                 case.append(rnd.choice([rnd.uniform(-1000, 1000), rnd.uniform(-1, 1), float(rnd.randint(-5000, 5000))]))
             else:
-                width, signed = INT_TYPES[kind]
-                case.append(wrap(kind, rnd.getrandbits(width)) if rnd.random() < 0.7 else rnd.choice(int_bounds(kind)))
+                bits, signed = INT_TYPES[kind]
+                case.append(wrap(kind, rnd.getrandbits(bits)) if rnd.random() < 0.7 else rnd.choice(int_bounds(kind)))
         cases.append(case)
     return cases
 
@@ -291,11 +348,12 @@ def case_value(kind, value, where):
             raise ValueError(f"{where}: {value!r} does not fit a double")
     if not isinstance(value, int):
         raise ValueError(f"{where}: expected a whole number, got {value!r}")
-    width, _ = INT_TYPES[kind]
+    integer = base_kind(kind)
+    width, _ = INT_TYPES[integer]
     low, high = -(1 << (width - 1)), (1 << width) - 1
     if not low <= value <= high:
         raise ValueError(f"{where}: {value} does not fit {kind} (allowed {low} to {high})")
-    return wrap(kind, value)
+    return wrap(integer, value)
 
 
 def file_cases(path, kinds):
@@ -351,7 +409,8 @@ def run_original(unicorn, img, entry, abi, kinds, ret, case, max_insns):
         if kind == "ptr":
             if cursor + len(value) > SCRATCH + SCRATCH_SIZE:
                 raise RuntimeError("pointer buffers do not fit in the scratch area; use a smaller --ptr-len")
-            uc.mem_write(cursor, value)
+            if value:
+                uc.mem_write(cursor, value)
             buffers.append((cursor, len(value)))
             values.append(cursor)
             cursor += (len(value) + 31) & ~15
@@ -390,7 +449,7 @@ def run_original(unicorn, img, entry, abi, kinds, ret, case, max_insns):
                 if stack_args:
                     uc.reg_write(reg, stack_args.pop(0) & 0xFFFFFFFF)
         for kind, value in reversed(list(zip(kinds[len(kinds) - len(stack_args):], stack_args))):
-            if kind in ("f64", "i64", "u64"):
+            if base_kind(kind) in ("f64", "i64", "u64"):
                 raise RuntimeError("64-bit and floating-point arguments are not supported in 32-bit mode")
             sp -= 4
             uc.mem_write(sp, struct.pack("<I", value & 0xFFFFFFFF))
@@ -419,7 +478,7 @@ def run_original(unicorn, img, entry, abi, kinds, ret, case, max_insns):
             raise RuntimeError("64-bit returns are not supported in 32-bit mode")
         raw = uc.reg_read(x86.UC_X86_REG_RAX if img.bits == 64 else x86.UC_X86_REG_EAX)
         value = wrap(ret, raw)
-    return value, [bytes(uc.mem_read(a, n)) for a, n in buffers]
+    return value, [bytes(uc.mem_read(a, n)) if n else b"" for a, n in buffers]
 
 
 def hint_for(reason):
@@ -429,6 +488,8 @@ def hint_for(reason):
     if "READ_UNMAPPED" in reason or "WRITE_UNMAPPED" in reason:
         return ("The function touched memory that is not part of the image: a global set up by the loader (relocations, TLS, heap), "
                 "or a pointer argument you did not declare as ptr.")
+    if "did not return within" in reason:
+        return ("The original did not finish: A count or length argument larger than its buffer is the usual cause. Declare it with len32 (or len64) right after its ptr argument, for example --args ptr,len32, so the buffer and its length are generated together; or pass your own --cases with --no-boundary --random 0.")
     if "INSN_INVALID" in reason:
         return "The emulator hit an instruction it does not support (for example a newer vector extension)."
     return "Check --abi, --args and --address; see the usage text."
@@ -615,13 +676,15 @@ def main():
         fail("RESULT: SETUP_ERROR\nThe Unicorn emulator is missing. Install it with: pip install unicorn")
 
     kinds = [k.strip() for k in args.args.split(",") if k.strip()]
-    for k in kinds:
+    for i, k in enumerate(kinds):
         if k not in CTYPES:
             fail(f"RESULT: SETUP_ERROR\nunknown argument type '{k}'. Use: {', '.join(CTYPES)}")
+        if k in LEN_BASE and (i == 0 or kinds[i - 1] != "ptr"):
+            fail(f"RESULT: SETUP_ERROR\n{k} must come right after the ptr argument whose length it holds (for example --args ptr,{k}).")
     if args.ret == "ptr":
         fail("RESULT: SETUP_ERROR\nA pointer return cannot be compared: the emulated and the native address spaces differ. "
              "Return the pointed-to value or an offset into one of the buffers (u64) from a small wrapper instead.")
-    if args.ret != "void" and args.ret not in CTYPES:
+    if args.ret not in ("void", "f64") and args.ret not in INT_TYPES:
         fail(f"RESULT: SETUP_ERROR\nunknown return type '{args.ret}'. Use void, f64 or an integer type (i8 u8 i16 u16 i32 u32 i64 u64).")
     if not (math.isfinite(args.float_tol) and args.float_tol >= 0):
         fail("RESULT: SETUP_ERROR\n--float-tol must be a finite number that is not negative.")
@@ -686,11 +749,12 @@ def main():
             kind, payload = candidate.call(case)
             if kind == "crash":
                 print(f"RESULT: CANDIDATE_CRASH at case {number}: args={show(kinds, case)}: {payload} (treat as a failure)")
-                print("HINT: an out-of-bounds read or write is the usual cause; ptr buffers are exactly --ptr-len bytes.")
+                print("HINT: an out-of-bounds read or write is the usual cause; ptr buffers are exactly --ptr-len bytes. " + 'A count or length argument larger than its buffer is the usual cause. Declare it with len32 (or len64) right after its ptr argument, for example --args ptr,len32, so the buffer and its length are generated together; or pass your own --cases with --no-boundary --random 0.')
                 sys.exit(1)
             if kind == "timeout":
                 print(f"RESULT: CANDIDATE_TIMEOUT at case {number}: args={show(kinds, case)}: no answer within {args.candidate_timeout:g} s "
                       "(treat as a failure)")
+                print("HINT: a loop bounded by an argument that exceeds its buffer is a common cause. " + 'A count or length argument larger than its buffer is the usual cause. Declare it with len32 (or len64) right after its ptr argument, for example --args ptr,len32, so the buffer and its length are generated together; or pass your own --cases with --no-boundary --random 0.')
                 sys.exit(1)
             if kind == "error":
                 bad.append((number, case, original, ("raised", payload)))

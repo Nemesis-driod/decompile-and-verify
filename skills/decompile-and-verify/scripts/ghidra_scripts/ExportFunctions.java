@@ -89,9 +89,17 @@ public class ExportFunctions extends GhidraScript {
                         cLines = c.split("\r?\n", -1).length;
                         gotos = count(GOTO, c);
                         autoVars = count(AUTO_VAR, c);
-                        String safe = f.getName().replaceAll("[^A-Za-z0-9_.-]", "_");
-                        cFile = "decompiled/" + f.getEntryPoint().toString() + "_" + safe + ".c";
-                        Files.writeString(new File(outDir, cFile).toPath(), c);
+                        cFile = "decompiled/" + f.getEntryPoint().toString() + "_" + safeFileName(f.getName()) + ".c";
+                        try {
+                            Files.writeString(new File(outDir, cFile).toPath(), c);
+                        } catch (java.io.IOException e) {
+                            // one function's file must never abort the whole export
+                            printerr("ExportFunctions: cannot write " + cFile + ": " + e.getMessage());
+                            cFile = "";
+                            status = "write_failed";
+                            okCount--;
+                            failCount++;
+                        }
                     } else {
                         status = (res != null && res.isTimedOut()) ? "timeout" : "failed";
                         failCount++;
@@ -115,10 +123,20 @@ public class ExportFunctions extends GhidraScript {
             sum.println("functions=" + total);
             sum.println("named_functions=" + named);
             sum.println("decompiled_ok=" + okCount);
+            sum.println("decompile_timeout_seconds=" + timeoutSec);
             sum.println("decompile_failed=" + failCount);
         }
         println("ExportFunctions: " + total + " functions, " + named + " named, " + okCount + " decompiled, "
                 + failCount + " failed -> " + outDir);
+    }
+
+    /** A file-name-safe version of a function name, short enough for any file system (255 bytes is the usual limit). */
+    private static String safeFileName(String name) {
+        String safe = name.replaceAll("[^A-Za-z0-9_.-]", "_");
+        if (safe.length() > 80) {
+            safe = safe.substring(0, 80) + "_" + String.format("%08x", name.hashCode());
+        }
+        return safe;
     }
 
     /** Always-quoted CSV field (function names may contain almost anything). */

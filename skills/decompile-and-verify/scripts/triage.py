@@ -41,7 +41,7 @@ SECRET_PATTERNS = [
     ("slack-token", re.compile(r"\bxox[baprs]-[0-9A-Za-z-]{10,}\b")),
     ("stripe-live-key", re.compile(r"\b[sr]k_live_[0-9a-zA-Z]{20,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
-    ("credential-assignment", re.compile(r"(?i)\b(?:api[_-]?key|secret|passwd|password|token)\s*[=:]\s*\S{6,}")),
+    ("credential-assignment", re.compile(r"""(?i)\b(?:api[_-]?key|client[_-]?secret|secret|passwd|password|token|access[_-]?key|auth[_-]?token)["']?\s*[=:]\s*["']?[^\s"',;})\]]{6,}""")),
 ]
 URL_RE = re.compile(r"https?://[^\s\"'<>\\]{6,}")
 URL_USERINFO_RE = re.compile(r"^(https?://)[^/\s:@]+:[^/\s@]+@", re.I)
@@ -96,9 +96,21 @@ def extract_strings(data):
     return out
 
 
+URL_WEBHOOK_RES = [                                  # (pattern, replacement): the secret is part of the path
+    re.compile(r"(?i)^(https?://hooks\.slack\.com/(?:services|workflows|triggers)/).+"),
+    re.compile(r"(?i)^(https?://(?:[\w-]+\.)?discord(?:app)?\.com/api/(?:v\d+/)?webhooks/).+"),
+    re.compile(r"(?i)^(https?://api\.telegram\.org/(?:file/)?bot)[^/\s]+"),
+    re.compile(r"(?i)^(https?://[\w.-]+\.webhook\.office\.com/webhookb2/).+"),
+    re.compile(r"(?i)^(https?://outlook\.office(?:365)?\.com/webhook/).+"),
+]
+
+
 def redact_url(url):
-    """Hide credentials embedded in URLs (user:pass@host and token-like query values)."""
-    return URL_SECRET_PARAM_RE.sub(r"\1***", URL_USERINFO_RE.sub(r"\1***:***@", url))
+    """Hide credentials embedded in URLs: user:pass@host, token-like query values, and the secret path of well-known webhooks."""
+    url = URL_SECRET_PARAM_RE.sub(r"\1***", URL_USERINFO_RE.sub(r"\1***:***@", url))
+    for rx in URL_WEBHOOK_RES:
+        url = rx.sub(lambda m: m.group(1) + "***", url)
+    return url
 
 
 def redact(value, kind):
@@ -108,6 +120,7 @@ def redact(value, kind):
 
 
 def parse_elf(f):
+    file_size = os.fstat(f.fileno()).st_size
     f.seek(0)
     ident = f.read(16)
     is64 = ident[4] == 2
@@ -118,6 +131,8 @@ def parse_elf(f):
     info = {"format": "ELF", "bits": 64 if is64 else 32, "arch": ELF_MACHINES.get(machine, f"machine 0x{machine:x}")}
     names = []
     if shoff and shnum and shentsize:
+        if shoff + shnum * shentsize > file_size:
+            raise ValueError("the section header table lies outside the file")
         shfmt = endian + ("IIQQQQIIQQ" if is64 else "IIIIIIIIII")
         sections = []
         for i in range(shnum):
@@ -128,6 +143,8 @@ def parse_elf(f):
             sections.append(struct.unpack(shfmt, raw))
         if shstrndx < len(sections):
             off, size = sections[shstrndx][4], sections[shstrndx][5]
+            if off + size > file_size:
+                raise ValueError(f"the section name table claims {size} bytes but the file has only {file_size}")
             f.seek(off)
             strtab = f.read(size)
             for s in sections:
@@ -179,11 +196,29 @@ def parse_zip(path):
     return info
 
 
+def looks_like_pyc(f):
+    """A .pyc starts with a 2-byte magic number and CR LF, then (after 4, 8 or 12 more bytes of header) a marshalled
+    code object, whose first byte is the type code 'c' (0x63), usually with the reference flag set (0xE3).
+    Requiring that keeps text files that happen to have CR LF at bytes 2-3 from being labelled bytecode."""
+    f.seek(0)
+    header = f.read(24)
+    if len(header) < 17 or header[2:4] != b"\r\n":
+        return False
+    magic = int.from_bytes(header[:2], "little")
+    if 3390 <= magic < 4000:                                   # Python 3.7 and later: 16-byte header
+        offsets = (16,)
+    elif 3000 <= magic < 3390 or magic >= 20000:               # Python 3.0-3.6 (12 bytes), Python 2 (8 bytes)
+        offsets = (8, 12)
+    else:
+        return False
+    return any(header[o] in (0x63, 0xE3) for o in offsets)
+
+
 def detect(path):
     """Identify the format. Malformed or truncated headers give a result that says so instead of an exception."""
     try:
         return detect_raw(path)
-    except (struct.error, IndexError, ValueError, OverflowError, EOFError, zipfile.BadZipFile) as e:
+    except (struct.error, IndexError, ValueError, OverflowError, EOFError, MemoryError, zipfile.BadZipFile) as e:
         with open(path, "rb") as f:
             head = f.read(4)
         label = "ELF" if head == b"\x7fELF" else "PE" if head[:2] == b"MZ" else "ZIP" if head == b"PK\x03\x04" else "file"
@@ -219,7 +254,7 @@ def detect_raw(path):
             info = {"format": "WebAssembly", "kind": "wasm"}
         elif head[:4] == b"\x04\x00\x00\x00" and b'{"files":' in head + f.read(240):
             info = {"format": "Electron asar archive", "kind": "electron"}
-        elif head[2:4] == b"\r\n" and size > 16:
+        elif looks_like_pyc(f):
             info = {"format": "Python bytecode (.pyc)", "kind": "python"}
     return size, info
 
@@ -232,7 +267,7 @@ ROUTES = {
     "dotnet": ".NET -> ilspycmd -p -o <outdir> <file>   (references/routes.md: .NET)",
     "java": "Java -> CFR / Vineflower   (references/routes.md: Java and Android)",
     "android": "Android -> jadx -d <outdir> <file>   (references/routes.md: Java and Android)",
-    "wasm": "WebAssembly -> wasm-decompile <file>   (references/routes.md: WebAssembly)",
+    "wasm": "WebAssembly -> wasm2wat <file> (readable text), wasm2c, wasm-objdump (wabt; wasm-decompile only if your wabt build has it)   (references/routes.md: WebAssembly)",
     "python": "Python bytecode -> pycdc <file>   (references/routes.md: Python)",
     "unknown": "unknown format -> run `file`, check for an archive/firmware container, then re-triage the extracted files",
 }

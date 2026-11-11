@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.3
+
+Fixed. A third public review, run against real Ghidra, found these; each was reproduced before it was fixed.
+- `verify_match.py`: a candidate whose only difference was a data constant or a string (`0.3f` for `0.2f`, `"WORLD"` for `"hello"`) reported `MATCH`, because only the instruction text was compared. The data sections (`.rodata*`, `.data*`, `.rdata`, `.bss*`: sizes, contents, relocations) are now compared for a whole object; with `--func` the MATCH line says that data was not compared, and `--data on` compares it.
+- `verify_match.py`: the inline-assembly guard missed `__asm__ __volatile__`, `asm __volatile__` and `asm inline`. It now handles every qualifier spelling, ignores comments and strings, and also scans the preprocessed source (skipping system headers, which use `__asm__` themselves), so a macro cannot hide assembly. It remains a tripwire, not a security boundary.
+- `ExportFunctions.java`: one very long function name (C++ templates) made the file name exceed the file-system limit and aborted the whole export with `RESULT: PARTIAL`. Names are now shortened with a hash, and a file that cannot be written is recorded as `write_failed` instead of stopping the export. `ghidra_export.py --decompile-timeout N` sets the per-function limit (it was fixed at 30 seconds and the wrapper never passed it); the summary records it.
+- `rank_functions.py`: functions with `decompile_status` timeout, failed or write_failed vanished silently, and `NOTHING_LEFT` was printed (exit 0) when only they remained. They are now named in a NOTE; if only they remain the verdict is `UNDECOMPILED_LEFT` (exit 1) with the fix; `--include-undecompiled` ranks them for work from the disassembly.
+- `verify_emulated.py`: the default boundary cases paired a 16-byte buffer with lengths such as 2147483646, so a correct `sum_bytes(p, n)` or `fill(buf, n, v)` produced `EMULATION_ERROR` with a misleading hint, or was blamed with `CANDIDATE_CRASH`. New argument types `len32` and `len64` (right after a `ptr`) generate a buffer and its length together, with empty, partial and full buffers. Without them the error now names the real cause. The skill's own example uses `ptr,len32`.
+- `verify_trace.py`: identical traces with an optional key (an `event` on some ticks) failed with `TRACE_DIVERGES`, because a key missing from both sides counted as a difference. A key that only one trace ever logs was silently skipped; it is now named in a WARNING, `--strict` fails on it (`TRACE_KEYS_DIFFER`), and `--keys` makes keys a requirement.
+- `triage.py`: Slack, Discord, Telegram and Teams webhook URLs were printed in full (their secret is in the path) and are now redacted in the console and the JSON; JSON-style credentials (`{"password":"..."}`) were not flagged and now are; a 192-byte ELF claiming a 70 TB section-name table raised `MemoryError` and is now reported as malformed; any text file with CR LF at bytes 2-3 was labelled Python bytecode (the marshalled code object is now checked); the WebAssembly route named `wasm-decompile`, which some wabt releases do not ship.
+- `verify_run.py`: hidden files (`.gitkeep`, `.DS_Store`) counted as test cases and could satisfy `--min-inputs`; they are now ignored and the run says so.
+- 36 new tests (150 in total), including live Ghidra tests for the long-name export and the decompile limit.
+
 ## 0.4.2
 
 Fixed. A second public review and this project's own Windows CI found more input-handling gaps. Each was reproduced before it was fixed.
